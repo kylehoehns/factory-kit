@@ -11,7 +11,7 @@ autoMerge: "on"
 
 maintainers: [kylehoehns]
 # The factory's GitHub App. Its PRs are trusted like the maintainer's.
-factoryBot: rsvp-factory-bot[bot]
+factoryBot: kh-factory-bot[bot]
 
 # The factory's own controls. Agents may never change these: the hooks block it, and the factory re-checks before it
 # pushes.
