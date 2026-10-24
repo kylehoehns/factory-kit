@@ -13,6 +13,8 @@ export type LiveSession = {
   issue: number;
   role: string;
   log: string;
+  /** The session's .factory/runs/ in its worktree: where `ask` leaves a live question and finds the answer. */
+  runs?: string;
   startedAt: string;
   endedAt?: string;
   outcome?: string;

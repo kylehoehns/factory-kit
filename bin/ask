@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Ask the maintainer one question while they're watching, and wait for the answer. Agents run it inside the sandbox:
+#
+#   .factory/runs/ask <<'JSON'
+#   {"question": "…", "context": "…", "options": ["(a) …", "(b) …"], "recommended": 0}
+#   JSON
+#
+# The question lands in this session's .factory/runs/question.json, which the maintainer's factory pane (and nothing
+# else) reads; their answer comes back as answer.json and is printed here. With no answer within FACTORY_ASK_WAIT
+# seconds (default 540, inside the Bash tool's 10-minute ceiling) it prints NO_ANSWER and the agent falls back to
+# leaving its questions on the ticket.
+set -euo pipefail
+
+runs=$(cd "$(dirname "$0")" && pwd)
+question="$runs/question.json"
+answer="$runs/answer.json"
+wait=${FACTORY_ASK_WAIT:-540}
+
+rm -f "$answer"
+cat >"$question.tmp"
+mv "$question.tmp" "$question"
+
+for ((waited = 0; waited < wait; waited += 2)); do
+  if [[ -f "$answer" ]]; then
+    cat "$answer"
+    rm -f "$answer" "$question"
+    exit 0
+  fi
+  sleep 2
+done
+rm -f "$question"
+echo NO_ANSWER

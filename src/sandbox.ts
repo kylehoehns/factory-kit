@@ -3,7 +3,7 @@
 // works inside the sandbox without the agent ever reaching the host's Docker.
 
 import { execFileSync } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { claudeCode, createSandbox } from "@ai-hero/sandcastle";
@@ -125,6 +125,8 @@ export async function runSessions(
           CLAUDE_CODE_OAUTH_TOKEN: claudeToken,
           // Repos' hooks check this to hold an agent to stricter rules than a person at the keyboard.
           FACTORY_RUN: "1",
+          // `ask` waits up to nine minutes for the maintainer; let the Bash tool allow that.
+          BASH_MAX_TIMEOUT_MS: "600000",
           // Agents commit as the factory app, not as whoever's git identity the host repo has.
           GIT_AUTHOR_NAME: bot,
           GIT_AUTHOR_EMAIL: botEmail,
@@ -142,6 +144,9 @@ export async function runSessions(
     const runsInWorktree = join(sandbox.worktreePath, RUNS);
     mkdirSync(runsInWorktree, { recursive: true });
     for (const input of inputs) copyFileSync(input, join(runsInWorktree, basename(input)));
+    // The live-question helper (bin/ask): the agent asks the maintainer here first, the ticket only if nobody answers.
+    copyFileSync(join(KIT, "bin/ask"), join(runsInWorktree, "ask"));
+    chmodSync(join(runsInWorktree, "ask"), 0o755);
     const read = (file: string) => {
       const path = join(runsInWorktree, file);
       return existsSync(path) ? readFileSync(path, "utf8") : undefined;
@@ -164,7 +169,7 @@ export async function runSessions(
       const started = Date.now();
       const { model, timeoutMinutes } = kit().sessions[session.role];
       const logPath = join(repo.root, RUNS, "logs", `${session.role}-${issue}.log`);
-      const finished = recordStart({ repo: repo.slug, issue, role: session.role, log: logPath });
+      const finished = recordStart({ repo: repo.slug, issue, role: session.role, log: logPath, runs: runsInWorktree });
       const result = await sandbox.run({
         agent: claudeCode(model),
         promptFile: join(KIT, "prompts", session.prompt),
