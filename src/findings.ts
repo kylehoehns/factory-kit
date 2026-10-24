@@ -6,7 +6,17 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { comment, gh, graphql, labels, noMentions, push, requestSecondOpinion, settleThread } from "./github.ts";
+import {
+  api,
+  comment,
+  gh,
+  labels,
+  noMentions,
+  push,
+  requestSecondOpinion,
+  reviewThreads,
+  settleThread,
+} from "./github.ts";
 import { runSessions } from "./sandbox.ts";
 import { kit, type Repo, RUNS, run } from "./shared.ts";
 import { log, note } from "./status.ts";
@@ -32,9 +42,9 @@ const FOLLOW_UP_REPLY = "Tracked as a follow-up: it's filed as a `needs-triage` 
 const followUpReply = (f: Finding) => (f.kind === "follow-up" ? FOLLOW_UP_REPLY : undefined);
 
 /**
- * Post findings as one review from the app, each on its own line as a thread, and return them with their thread
- * IDs, so the factory answers each thread by ID later. A finding GitHub won't place (no line, or a line outside the
- * diff) goes in the review's body instead and gets no thread.
+ * Post findings from the app: a review holding the heading and any finding GitHub won't place on a line, then each
+ * placed finding as its own comment on its line. Returns the findings with the ID of the thread each one opened, found
+ * by the comment's ID, so the factory answers each thread by ID later.
  */
 export async function postFindings(
   repo: Repo,
@@ -45,37 +55,24 @@ export async function postFindings(
   signature = "",
 ): Promise<Finding[]> {
   if (findings.length === 0) return [];
-  const text = (f: Finding) => noMentions(`[${f.kind}] **${f.title}**: ${f.body}${signature}`);
-  const prId = gh(repo, token, "pr", "view", String(pr), "--json", "id", "--jq", ".id");
-  const { addPullRequestReview } = await graphql<{ addPullRequestReview: { pullRequestReview: { id: string } } }>(
-    token,
-    `mutation($pr: ID!) { addPullRequestReview(input: { pullRequestId: $pr }) { pullRequestReview { id } } }`,
-    { pr: prId },
-  );
-  const review = addPullRequestReview.pullRequestReview.id;
-  const posted: Finding[] = [];
-  for (const f of findings) {
-    if (!f.path || !f.line) {
-      posted.push(f);
-      continue;
-    }
-    const thread = await graphql<{ addPullRequestReviewThread: { thread: { id: string } } }>(
-      token,
-      `mutation($review: ID!, $path: String!, $line: Int!, $body: String!) {
-      addPullRequestReviewThread(input: { pullRequestReviewId: $review, path: $path, line: $line, side: RIGHT, body: $body }) {
-        thread { id } } }`,
-      { review, path: f.path, line: f.line, body: text(f) },
-    ).catch(() => undefined); // a line outside the diff: the finding goes in the body
-    posted.push({ ...f, thread: thread?.addPullRequestReviewThread.thread.id });
+  const text = (f: Finding) => `[${f.kind}] **${f.title}**: ${f.body}${signature}`;
+  const commit = gh(repo, token, "pr", "view", String(pr), "--json", "headRefOid", "--jq", ".headRefOid");
+  const comments = new Map<Finding, string>();
+  for (const f of findings.filter((f) => f.path && f.line)) {
+    const posted = await api<{ node_id: string }>(repo, token, `/pulls/${pr}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body: noMentions(text(f)), commit_id: commit, path: f.path, line: f.line, side: "RIGHT" }),
+    }).catch(() => undefined); // a line outside the diff: the finding goes in the review body
+    if (posted) comments.set(f, posted.node_id);
   }
-  const inBody = posted.filter((f) => !f.thread).map((f) => `- ${text(f)}${where(f)}`);
-  await graphql(
-    token,
-    `mutation($review: ID!, $body: String!) {
-    submitPullRequestReview(input: { pullRequestReviewId: $review, event: COMMENT, body: $body }) { clientMutationId } }`,
-    { review, body: noMentions([heading, ...inBody].join("\n\n")) },
-  );
-  return posted;
+  const threads = comments.size ? await reviewThreads(repo, token, pr) : [];
+  const thread = (f: Finding) => threads.find((t) => t.first === comments.get(f))?.id;
+  const inBody = findings.filter((f) => !comments.has(f)).map((f) => `- ${text(f)}${where(f)}`);
+  await api(repo, token, `/pulls/${pr}/reviews`, {
+    method: "POST",
+    body: JSON.stringify({ event: "COMMENT", body: noMentions([heading, ...inBody].join("\n\n")) }),
+  });
+  return findings.map((f) => ({ ...f, thread: thread(f) }));
 }
 
 /** Reply to and resolve the threads the factory posted for these findings. One-way doors stay open: they're the
