@@ -9,8 +9,10 @@ import { basename, join } from "node:path";
 import { claudeCode, createSandbox } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { Role } from "./config.ts";
+import { draining, sessionSignal } from "./control.ts";
 import { recordStart } from "./live.ts";
 import { KIT, kit, type Outcome, type Repo, RUNS, run } from "./shared.ts";
+import { log, writeStatus } from "./status.ts";
 
 const DIND_IMAGE = "docker:29.9.2-dind";
 
@@ -101,6 +103,7 @@ export async function runSessions(
   sessions: Session[],
   inputs: string[],
   claudeToken: string,
+  pr?: number,
 ): Promise<SessionsResult> {
   const privateDocker = repo.config.sandbox.docker ? startPrivateDocker(repo, issue) : undefined;
   const mounts = repo.config.sandbox.caches.map((cache) => {
@@ -165,18 +168,20 @@ export async function runSessions(
     };
     let last: Outcome = { outcome: "success", summary: "" };
     for (const session of sessions) {
-      console.log(`${repo.name}#${issue}: ${session.role}…`);
+      log(`${repo.name}#${issue}: ${session.role}…`);
       const started = Date.now();
       const { model, timeoutMinutes } = kit().sessions[session.role];
       const logPath = join(repo.root, RUNS, "logs", `${session.role}-${issue}.log`);
       const finished = recordStart({ repo: repo.slug, issue, role: session.role, log: logPath, runs: runsInWorktree });
+      const current = { repo: repo.slug, issue, role: session.role, startedAt: finished.startedAt };
+      writeStatus({ phase: draining() ? "draining" : "build", current });
       const result = await sandbox.run({
         agent: claudeCode(model),
         promptFile: join(KIT, "prompts", session.prompt),
         promptArgs,
         name: `${session.role} ${repo.name}#${issue}`,
         logging: { type: "file", path: logPath },
-        signal: AbortSignal.timeout(timeoutMinutes * 60_000),
+        signal: sessionSignal(timeoutMinutes * 60_000), // its timeout, or a second Ctrl+C
       });
       const outcomeText = read("outcome.json");
       rmSync(join(runsInWorktree, "outcome.json"), { force: true });
@@ -184,12 +189,17 @@ export async function runSessions(
         ? JSON.parse(outcomeText)
         : { outcome: "blocked", summary: `The ${session.role} session ended without writing an outcome.` };
       finished(outcome.outcome, outcome.summary);
+      writeStatus({ phase: draining() ? "draining" : "pass", current: undefined });
       appendFileSync(
         join(repo.root, RUNS, "metrics.jsonl"),
         `${JSON.stringify({
           at: new Date().toISOString(),
+          repo: repo.slug,
           issue,
+          ...(pr ? { pr } : {}),
           role: session.role,
+          model,
+          startedAt: finished.startedAt,
           outcome: outcome.outcome,
           minutes: (Date.now() - started) / 60_000,
           commits: result.commits.length,

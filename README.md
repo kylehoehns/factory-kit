@@ -42,9 +42,29 @@ cp factory.example.yml factory.yml     # your app, keychain item names and repos
 bin/setup-keychain.sh                  # stores the Claude token and the app key in the keychain
 npm run build-images                   # each repo's sandbox image, from its .factory/Dockerfile
 npm run factory                        # keeps watching; add -- --once for a single pass
+bin/factoryctl start                   # or: start it in the background (see Controls)
 ```
 
 `factory.yml` is gitignored. The work-in-progress limit in it is shared across all your repos.
+
+## Controls
+
+Only one factory runs per machine: a second start says which pid is already running and exits. While it runs, the factory writes what it is doing to `~/.cache/factory/` (`status.json`, `events.jsonl` and `live.json`), which the factory-watch pane in Claude Code reads.
+
+`bin/factoryctl` starts and stops it without hunting for its terminal. Each verb prints one JSON line and exits 0 only on success.
+
+| Verb | What it does |
+|---|---|
+| `factoryctl start` | Starts the factory in the background, logging to `factory-console.log`. Refuses if one is already running. |
+| `factoryctl stop` | Drains: the running session finishes and publishes as usual, then the factory stops. Returns at once. |
+| `factoryctl stop --now` | Cuts the running session off now. Its ticket goes back in the queue. |
+| `factoryctl restart` | Drains, waits for the stop (up to 50 minutes), then starts again. Use it to load new kit code. |
+| `factoryctl poll` | Ends the wait between passes, so the factory checks GitHub now. |
+| `factoryctl status` | `status.json`, plus whether the factory is alive and controllable. |
+
+In a terminal, the first Ctrl+C drains the same way and the second stops now. Ctrl+C also reaches the processes the factory started in that terminal, so `factoryctl stop` is the cleaner drain.
+
+A factory started before these controls existed doesn't write `status.json`, so `factoryctl` won't stop it. Stop that one once in its own terminal with Ctrl+C (between sessions), then run `factoryctl start`. From then on everything works from here or the pane.
 
 ## Working on the kit
 

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { comment, gh, labels, push, requestSecondOpinion, reviewThreads, settleThread } from "./github.ts";
 import { runSessions } from "./sandbox.ts";
 import { kit, type Repo, RUNS, run } from "./shared.ts";
+import { log, note } from "./status.ts";
 
 export type Finding = {
   kind: "fixed" | "blocker" | "one-way-door" | "follow-up";
@@ -44,7 +45,7 @@ export async function settleFindings(
     if (!thread || finding.kind === "one-way-door") continue;
     const reply = replies.get(finding.title) ?? (finding.kind === "follow-up" ? FOLLOW_UP_REPLY : undefined);
     await settleThread(token, thread.id, reply, keepOpen).catch((e) =>
-      console.log(`${repo.name} PR #${pr}: could not settle "${finding.title}": ${e}`),
+      log(`${repo.name} PR #${pr}: could not settle "${finding.title}": ${e}`),
     );
   }
 }
@@ -159,7 +160,7 @@ export async function triageSecondOpinion(
     return;
   }
 
-  console.log(
+  log(
     `${repo.name} PR #${pr}: ${blockers.length} blocker(s) from the second opinion, review round ${round} of ${kit().rounds.review}`,
   );
   await prepareTask();
@@ -174,6 +175,7 @@ export async function triageSecondOpinion(
     [{ role: "fixReview", prompt: "fix-review.md" }],
     [join(repo.root, RUNS, "task.md"), findingsFile],
     claudeToken,
+    pr,
   );
   const fresh = await freshToken();
   const commits = run(repo, "git", ["rev-list", `origin/${branch}..${branch}`]);
@@ -187,9 +189,7 @@ export async function triageSecondOpinion(
     await settleFindings(repo, fresh, pr, blockers, reasons, true);
     labels(repo, fresh, pr, { add: ["decision-needed"] });
     comment(repo, fresh, pr, DECLINED_ALL);
-    console.log(
-      `${repo.name} PR #${pr}: the factory declined every second-opinion blocker; waiting for the maintainer`,
-    );
+    log(`${repo.name} PR #${pr}: the factory declined every second-opinion blocker; waiting for the maintainer`);
     return;
   }
   if (outcome.outcome !== "success" || !commits) {
@@ -214,7 +214,7 @@ export async function triageSecondOpinion(
   );
   // Ask for a fresh second opinion on the fixed code.
   requestSecondOpinion(repo, fresh, pr);
-  console.log(`${repo.name} PR #${pr}: pushed review fix round ${round}`);
+  log(`${repo.name} PR #${pr}: pushed review fix round ${round}`);
 }
 
 // --- Filing follow-ups once a PR merges ---
@@ -271,6 +271,9 @@ export function fileFollowUps(repo: Repo, token: string, prefix: string) {
       return `#${url.split("/").pop()}`;
     });
     comment(repo, token, pr.number, `Filed follow-ups: ${filed.join(", ")}.\n\n${FILED}`);
-    console.log(`${repo.name} PR #${pr.number}: filed follow-ups ${filed.join(", ")}`);
+    note("followups", repo.slug, `${repo.name} PR #${pr.number}: filed follow-ups ${filed.join(", ")}`, {
+      pr: pr.number,
+      issue: Number(pr.headRefName.slice(prefix.length)),
+    });
   }
 }

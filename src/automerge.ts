@@ -7,11 +7,18 @@
 // it in `shadow` and `on` alike. The decision was the maintainer's; the factory only clicks the button.
 
 import { api, ciResult, comment, type FactoryPr, gh, reviewThreads, settleThread, type Thread } from "./github.ts";
-import { type Repo, run } from "./shared.ts";
+import { BRANCH_PREFIX, type Repo, run } from "./shared.ts";
+import { log, note } from "./status.ts";
 
 const MARK = (sha: string) => `<!-- factory-auto-merge sha=${sha} -->`;
 const AUTO_MERGED = "Auto-merged by the factory";
 const short = (pr: FactoryPr) => pr.headRefOid.slice(0, 7);
+const tierOf = (pr: FactoryPr) => pr.labels.find((l) => l.name.startsWith("risk:"))?.name.slice(5);
+const facts = (pr: FactoryPr) => ({
+  pr: pr.number,
+  issue: Number(pr.headRefName.slice(BRANCH_PREFIX.length)),
+  tier: tierOf(pr),
+});
 
 /** Says why on the PR, then squash-merges exactly the commit that was checked. */
 async function merge(repo: Repo, token: string, pr: FactoryPr, why: string) {
@@ -117,7 +124,7 @@ export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
         pr,
         `Merged by the factory: ${approver} approved ${short(pr)} and all checks are green.`,
       );
-      console.log(`${repo.name} PR #${pr.number}: merged after ${approver}'s approval`);
+      note("merged", repo.slug, `${repo.name} PR #${pr.number}: merged after ${approver}'s approval`, facts(pr));
       continue;
     }
     if (mode === "shadow" || stopped) {
@@ -126,10 +133,10 @@ export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
         : "Shadow mode: the maintainer merges.";
       const note = `Would auto-merge: low tier, all checks green, nothing left open. ${why}`;
       comment(repo, token, pr.number, `${note}\n\n${MARK(pr.headRefOid)}`);
-      console.log(`${repo.name} PR #${pr.number}: would auto-merge (${stopped ? "paused" : "shadow"})`);
+      log(`${repo.name} PR #${pr.number}: would auto-merge (${stopped ? "paused" : "shadow"})`);
       continue;
     }
     await merge(repo, token, pr, `${AUTO_MERGED}: low tier, all checks green, nothing left open.`);
-    console.log(`${repo.name} PR #${pr.number}: auto-merged`);
+    note("merged", repo.slug, `${repo.name} PR #${pr.number}: auto-merged`, facts(pr));
   }
 }

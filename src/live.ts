@@ -1,7 +1,8 @@
 // What the factory is doing right now, for a viewer to read: ~/.cache/factory/live.json, the running and the most
-// recent agent sessions across every repo. Written by this one process only, so a plain read-modify-write is safe.
+// recent agent sessions across every repo. Written by this one process only, so a plain read-modify-write is safe;
+// each write goes to a .tmp file that is then renamed over it, so a reader never sees half a file.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -31,14 +32,17 @@ function load(): LiveSession[] {
 
 function save(sessions: LiveSession[]) {
   mkdirSync(dirname(LIVE), { recursive: true });
-  writeFileSync(LIVE, `${JSON.stringify(sessions.slice(-KEEP), null, 2)}\n`);
+  writeFileSync(`${LIVE}.tmp`, `${JSON.stringify(sessions.slice(-KEEP), null, 2)}\n`);
+  renameSync(`${LIVE}.tmp`, LIVE);
 }
 
-/** Records a session as running; returns how to mark it finished. */
-export function recordStart(session: Omit<LiveSession, "startedAt">): (outcome: string, summary: string) => void {
+/** Records a session as running; returns how to mark it finished, carrying the session's startedAt. */
+export function recordStart(
+  session: Omit<LiveSession, "startedAt">,
+): ((outcome: string, summary: string) => void) & { startedAt: string } {
   const entry: LiveSession = { ...session, startedAt: new Date().toISOString() };
   save([...load(), entry]);
-  return (outcome, summary) =>
+  const finish = (outcome: string, summary: string) =>
     save(
       load().map((s) =>
         s.startedAt === entry.startedAt && s.log === entry.log
@@ -46,6 +50,7 @@ export function recordStart(session: Omit<LiveSession, "startedAt">): (outcome: 
           : s,
       ),
     );
+  return Object.assign(finish, { startedAt: entry.startedAt });
 }
 
 /** Sessions left "running" by a factory that stopped mid-run are marked interrupted at startup. */

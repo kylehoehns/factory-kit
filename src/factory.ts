@@ -11,11 +11,23 @@
 //               sandbox, then published as a PR by the factory app
 //
 // Agents never hold a GitHub credential: github.ts does, with the app key from the macOS keychain.
+//
+// One factory per machine (a pidfile, and a check for any other `node src/factory.ts`). It says what it is doing in
+// ~/.cache/factory/status.json and events.jsonl, and bin/factoryctl stops (drains), wakes and restarts it (control.ts).
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { autoMerge } from "./automerge.ts";
-import { claim, loadTickets, pick, workInProgress, writeTask } from "./dispatch.ts";
+import {
+  buildUntilDrained,
+  draining,
+  finishDrain,
+  releaseOrphans,
+  signalHandler,
+  sleepUntilNextPass,
+  stopNow,
+} from "./control.ts";
+import { claim, loadTickets, pick, ready, workInProgress, writeTask } from "./dispatch.ts";
 import {
   addFollowUps,
   type Finding,
@@ -32,6 +44,7 @@ import { pruneWorktrees, runSessions } from "./sandbox.ts";
 import {
   BRANCH_PREFIX,
   forbiddenChanges,
+  KIT,
   keychain,
   kit,
   type Outcome,
@@ -40,6 +53,17 @@ import {
   RUNS,
   run,
 } from "./shared.ts";
+import {
+  acquireLock,
+  currentStatus,
+  initStatus,
+  kitVersion,
+  log,
+  note,
+  releaseLock,
+  type Step,
+  writeStatus,
+} from "./status.ts";
 
 type Review = { summary: string; findings: Finding[] };
 
@@ -54,7 +78,7 @@ function block(repo: Repo, token: string, target: number, reason: string) {
   }
   const retry = "A human needs to look. Remove `agent:blocked` to let the factory try again.";
   comment(repo, token, target, `The factory stopped: ${reason}\n\n${retry}`);
-  console.log(`${repo.name}#${target}: blocked: ${reason}`);
+  note("blocked", repo.slug, `${repo.name}#${target}: blocked: ${reason}`);
 }
 
 /** Pocock's needs-info: leave the questions on the ticket and move on; answers arrive as comments. */
@@ -69,7 +93,9 @@ function ask(repo: Repo, token: string, issue: number, outcome: Outcome) {
     `The factory has questions before it can build this ticket.\n\n${questions || outcome.summary}\n\n${answer}`,
   );
   labels(repo, token, issue, { add: ["needs-info"], remove: ["ready-for-agent", "agent:in-progress"] });
-  console.log(`${repo.name}#${issue}: needs-info (${outcome.questions?.length ?? 0} question(s))`);
+  note("needsinfo", repo.slug, `${repo.name}#${issue}: needs-info (${outcome.questions?.length ?? 0} question(s))`, {
+    issue,
+  });
 }
 
 // --- 1. Fix rounds: red CI, and conflicts with main (rounds.ts) ---
@@ -141,7 +167,7 @@ async function postReview(repo: Repo, token: string, pr: number, review: Review)
   } catch {
     // A line outside the diff makes GitHub reject the whole review; keep every finding in the body instead.
     await post([], review.findings).catch((e) =>
-      console.log(`${repo.name} PR #${pr}: could not post the factory review: ${e}`),
+      log(`${repo.name} PR #${pr}: could not post the factory review: ${e}`),
     );
   }
   addFollowUps(
@@ -191,7 +217,11 @@ async function publish(
   // Every factory PR gets the independent second opinion; its pass can make a small PR low.
   requestSecondOpinion(repo, token, pr);
   const { tier } = floorTier(localFiles(repo.root, `origin/main...${branch}`), repo.config.risk, "factory", true, "");
-  console.log(`${repo.name}#${issue}: ${url} (${tier} risk before the second opinion)`);
+  note("pr", repo.slug, `${repo.name}#${issue}: opened PR #${pr} (${tier} risk before the second opinion)`, {
+    issue,
+    pr,
+    tier,
+  });
 }
 
 async function build(repo: Repo, issue: number, claudeToken: string) {
@@ -218,36 +248,49 @@ async function build(repo: Repo, issue: number, claudeToken: string) {
     } else if (outcome.outcome === "question") ask(repo, token, issue, outcome);
     else block(repo, token, issue, outcome.summary);
   } catch (error) {
+    if (stopNow.signal.aborted) return; // stopped now: the signal handler puts the ticket back in the queue
     block(repo, await appToken(repo), issue, `the run failed: ${(error as Error).message}`);
   }
 }
 
-/** One ticket at a time, across every repo, while the shared work-in-progress limit allows. */
+/** One ticket at a time, across every repo, while the shared work-in-progress limit allows and no drain started. */
 async function buildTickets(repos: Repo[], claudeToken: string) {
-  for (;;) {
+  const claimNext = async () => {
     let wip = 0;
     for (const repo of repos) wip += await workInProgress(repo, await appToken(repo));
+    let readyCount = 0;
     let next: { repo: Repo; issue: number } | undefined;
     for (const repo of repos) {
       const token = await appToken(repo);
-      const ticket = pick(await loadTickets(repo, token), wip, kit().wipLimit, repo.config.maintainers);
+      const tickets = await loadTickets(repo, token);
+      readyCount += ready(tickets, repo.config.maintainers).length;
+      const ticket = next ? undefined : pick(tickets, wip, kit().wipLimit, repo.config.maintainers);
       if (ticket) {
         next = { repo, issue: ticket.number };
         await claim(repo, token, ticket.number);
         await writeTask(repo, token, ticket.number, taskFile(repo));
-        break;
       }
     }
+    writeStatus({ wip: next ? wip + 1 : wip, ready: next ? readyCount - 1 : readyCount });
     if (!next) {
-      console.log("No ready ticket, or the work-in-progress limit is reached.");
-      return;
+      const full = wip >= kit().wipLimit;
+      note("factory", "", full ? `idle: WIP ${wip}/${kit().wipLimit} full` : "idle: nothing ready");
     }
-    await build(next.repo, next.issue, claudeToken);
-  }
+    return next;
+  };
+  await buildUntilDrained(claimNext, (next) => build(next.repo, next.issue, claudeToken));
 }
 
 // --- The loop ---
 
+// A closed pipe (the `tee` in front of the console log went away) must not crash a factory mid-session.
+process.stdout.on("error", () => {});
+const once = process.argv.includes("--once");
+const lock = acquireLock(); // before anything else: a second factory must not even mark the first one's sessions
+if (!lock.ok) {
+  console.log(lock.message);
+  process.exit(3);
+}
 const claudeToken = keychain(kit().keychain.claudeToken);
 // Fail before touching GitHub: a wrong keychain item otherwise surfaces as "Not logged in" inside the sandbox.
 if (!/^sk-ant-[A-Za-z0-9_-]+$/.test(claudeToken)) {
@@ -256,15 +299,72 @@ if (!/^sk-ant-[A-Za-z0-9_-]+$/.test(claudeToken)) {
       "Re-run bin/setup-keychain.sh --token with the output of 'claude setup-token'.",
   );
 }
-const once = process.argv.includes("--once");
+initStatus({
+  kit: kitVersion(KIT),
+  node: process.version,
+  once,
+  pollSeconds: kit().pollSeconds,
+  wipLimit: kit().wipLimit,
+  rounds: kit().rounds,
+  sessions: kit().sessions,
+  repos: kit().repos,
+  phase: "pass",
+});
+setInterval(() => writeStatus({}), 15_000).unref(); // the heartbeat: a stale beatAt means a stuck factory
 interruptLeftovers();
+
+let opened: Repo[] = [];
+for (const { slug, path } of kit().repos) {
+  try {
+    const repo = openRepo(slug, path);
+    opened.push(repo);
+    releaseOrphans(repo, await appToken(repo));
+  } catch (error) {
+    log(`${slug}: could not check for stale claims: ${(error as Error).message}`);
+  }
+}
+
+const stopSignal = signalHandler(
+  () => {
+    writeStatus({ phase: "draining" });
+    const current = currentStatus()?.current;
+    log(
+      current
+        ? `Draining: finishing ${current.repo}#${current.issue}, then stopping. Ctrl+C / SIGTERM again to stop now.`
+        : "Draining: nothing is running, so stopping after this step. Ctrl+C / SIGTERM again to stop now.",
+    );
+  },
+  async () => {
+    const current = currentStatus()?.current;
+    log(current ? `Stopping now: cutting off ${current.repo}#${current.issue}.` : "Stopping now.");
+    interruptLeftovers();
+    const repo = current && opened.find((r) => r.slug === current.repo);
+    if (repo && current) {
+      try {
+        labels(repo, await appToken(repo), current.issue, { remove: ["agent:in-progress"] });
+        note("factory", repo.slug, `stopped now: #${current.issue} is back in the queue`, { issue: current.issue });
+      } catch (error) {
+        log(`Could not put #${current.issue} back in the queue: ${(error as Error).message}`);
+      }
+    }
+    writeStatus({ phase: "stopped", current: undefined, step: undefined });
+    releaseLock();
+    process.exit(130);
+  },
+);
+process.on("SIGINT", stopSignal);
+process.on("SIGTERM", stopSignal);
+
 const names = kit()
   .repos.map((r) => r.slug)
   .join(", ");
-console.log(
-  once ? `Factory: one pass over ${names}.` : `Factory: watching ${names} every ${kit().pollSeconds}s. Ctrl+C to stop.`,
+log(
+  once
+    ? `Factory: one pass over ${names}.`
+    : `Factory: watching ${names} every ${kit().pollSeconds}s. bin/factoryctl stop (or Ctrl+C) drains it.`,
 );
 for (;;) {
+  writeStatus({ phase: draining() ? "draining" : "pass", step: undefined, current: undefined, nextPassAt: undefined });
   const repos: Repo[] = [];
   for (const { slug, path } of kit().repos) {
     try {
@@ -272,23 +372,43 @@ for (;;) {
       mkdirSync(join(repo.root, RUNS), { recursive: true });
       repos.push(repo);
     } catch (error) {
-      console.log(`${slug}: skipped this pass: ${(error as Error).message}`); // a bad config.yml stops only its repo
+      log(`${slug}: skipped this pass: ${(error as Error).message}`); // a bad config.yml stops only its repo
     }
   }
+  opened = repos;
   for (const repo of repos) {
     for (const step of [fixFactoryPrs, reviewFindings, merges, followUps]) {
+      if (draining()) break;
+      writeStatus({ step: step.name as Step });
       try {
         await step(repo, claudeToken);
       } catch (error) {
-        console.log(`${repo.name} ${step.name}: ${(error as Error).message}`); // keep watching; the next pass retries
+        const message = (error as Error).message;
+        writeStatus({ lastError: { at: new Date().toISOString(), step: `${step.name} (${repo.name})`, message } });
+        note("error", repo.slug, `${repo.name} ${step.name}: ${message}`); // keep watching; the next pass retries
       }
     }
   }
-  try {
-    await buildTickets(repos, claudeToken);
-  } catch (error) {
-    console.log(`buildTickets: ${(error as Error).message}`);
+  if (!draining()) {
+    writeStatus({ step: "buildTickets" });
+    try {
+      await buildTickets(repos, claudeToken);
+    } catch (error) {
+      const message = (error as Error).message;
+      writeStatus({ lastError: { at: new Date().toISOString(), step: "buildTickets", message } });
+      note("error", "", `buildTickets: ${message}`);
+    }
+  }
+  writeStatus({ lastPassAt: new Date().toISOString(), step: undefined });
+  if (draining()) {
+    finishDrain(() => writeStatus({ phase: "stopped", current: undefined, step: undefined }), releaseLock);
+    log("Drained: nothing is running. Stopped.");
+    process.exit(0);
   }
   if (once) break;
-  await new Promise((resolve) => setTimeout(resolve, kit().pollSeconds * 1000));
+  const woke = await sleepUntilNextPass(kit().pollSeconds, {
+    onSleep: (at) => writeStatus({ phase: "sleeping", nextPassAt: at.toISOString() }),
+  });
+  if (woke === "wake") log("Woken by factoryctl poll: starting a pass now.");
 }
+writeStatus({ phase: "stopped", current: undefined });

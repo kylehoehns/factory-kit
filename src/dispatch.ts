@@ -28,7 +28,12 @@ export function pick(
   maintainers: string[],
 ): Ticket | undefined {
   if (workInProgress >= wipLimit) return undefined;
-  const ready = tickets.filter(
+  return ready(tickets, maintainers).sort((a, b) => a.number - b.number)[0];
+}
+
+/** The tickets the factory would build, the work-in-progress limit aside. */
+export function ready(tickets: Ticket[], maintainers: string[]): Ticket[] {
+  return tickets.filter(
     (t) =>
       t.labels.includes(TRIGGER) &&
       ![CLAIMED, BLOCKED, "spec"].some((l) => t.labels.includes(l)) &&
@@ -38,7 +43,6 @@ export function pick(
       t.labelledBy !== undefined &&
       maintainers.includes(t.labelledBy),
   );
-  return ready.sort((a, b) => a.number - b.number)[0];
 }
 
 type Issue = {

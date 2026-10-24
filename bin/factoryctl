@@ -1,0 +1,164 @@
+#!/bin/zsh
+# Start, stop, restart and nudge the factory without hunting for its terminal. The factory pane calls this; so can you.
+#
+#   factoryctl start        start it in the background (detached, logging to factory-console.log); refuses if one runs
+#   factoryctl stop         drain: the running session finishes and publishes, then it stops; returns at once
+#   factoryctl stop --now   cut the running session off now (its ticket goes back in the queue)
+#   factoryctl restart      drain, wait for it to stop (up to 50 minutes), then start
+#   factoryctl poll         end the wait between passes: check GitHub now
+#   factoryctl status       status.json, plus whether it is alive and controllable
+#
+# Each prints one JSON line {ok, message, pid?} and exits 0 only on success. Only a factory started with the controls
+# (one that writes status.json with controls: 1) can be stopped or polled from here; one started by hand before them is
+# stopped in its own terminal with Ctrl+C.
+set -u
+setopt extendedglob
+
+KIT=${0:A:h:h}
+CACHE=${FACTORY_CACHE_DIR:-$HOME/.cache/factory}
+STATUS=$CACHE/status.json
+FACTORY='node .*src/factory\.ts'
+
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/}
+  print -rn -- "\"$s\""
+}
+
+# reply ok message [pid] [exit code]
+reply() {
+  local ok=$1 message=$2 pid=${3:-} code=${4:-}
+  local line="{\"ok\":$ok,\"message\":$(json_str "$message")"
+  [[ -n $pid ]] && line+=",\"pid\":$pid"
+  print -r -- "$line}"
+  [[ -n $code ]] && exit $code
+  [[ $ok == true ]] && exit 0 || exit 1
+}
+
+status_json() { [[ -f $STATUS ]] && <"$STATUS" || print -n ""; }
+
+# field name: a number or a plain string field of status.json's top level
+field() {
+  local json=$(status_json) name=$1
+  if [[ $json =~ "\"$name\":([0-9]+)" ]]; then print -r -- $match[1]
+  elif [[ $json =~ "\"$name\":\"([^\"]*)\"" ]]; then print -r -- $match[1]
+  fi
+}
+
+is_factory() { # pid
+  local cmd=$(ps -o command= -p $1 2>/dev/null)
+  [[ -n $cmd && $cmd =~ $FACTORY ]]
+}
+
+# The live factory's pid: the one status.json names if it is alive and is the factory, else any pgrep finds.
+alive() {
+  local pid=$(field pid)
+  if [[ -n $pid ]] && kill -0 $pid 2>/dev/null && is_factory $pid; then print -r -- $pid; return 0; fi
+  local found=$(pgrep -f "$FACTORY" | head -1)
+  if [[ -n $found ]]; then print -r -- $found; return 0; fi
+  return 1
+}
+
+controllable() { # pid
+  [[ $(field pid) == $1 && $(field controls) == 1 ]]
+}
+
+current() { # "rootcause#5" of the running session, or nothing
+  local json=$(status_json)
+  if [[ $json =~ '"current":\{"repo":"([^"]*)","issue":([0-9]+)' ]]; then print -r -- "${match[1]:t}#$match[2]"; fi
+}
+
+require_controls() { # pid
+  local pid=$1
+  [[ -z $pid ]] && reply false "no factory is running" "" 1
+  controllable $pid || reply false "pid $pid was started before the controls: stop it in its terminal with Ctrl+C" $pid 2
+}
+
+do_start() {
+  local running
+  if running=$(alive); then reply false "already running: pid $running" $running 2; fi
+  local before=$(field pid)
+  cd $KIT || reply false "can't cd to $KIT" "" 1
+  source ~/.nvm/nvm.sh >/dev/null 2>&1 && nvm use >/dev/null 2>&1 || reply false "nvm or the kit's Node version isn't available" "" 1
+  FACTORYCTL=1 nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' node src/factory.ts >>factory-console.log 2>&1 &
+  disown 2>/dev/null
+  local pid beat now
+  for i in {1..20}; do
+    sleep 0.5
+    pid=$(field pid)
+    if [[ -n $pid && $pid != $before ]] && kill -0 $pid 2>/dev/null; then
+      reply true "started pid $pid" $pid
+    fi
+  done
+  reply false "didn't start within 10s. Last console lines:"$'\n'"$(tail -n 20 $KIT/factory-console.log 2>/dev/null)" "" 1
+}
+
+do_stop() {
+  local pid=$(alive) on=$(current)
+  require_controls "$pid"
+  mkdir -p $CACHE && touch $CACHE/drain
+  if [[ -n $on ]]; then reply true "draining: finishes $on, then stops" $pid
+  else reply true "stopping: nothing running" $pid; fi
+}
+
+do_stop_now() {
+  local pid=$(alive)
+  require_controls "$pid"
+  is_factory $pid || reply false "pid $pid is no longer the factory: nothing sent" $pid 1
+  kill -TERM $pid 2>/dev/null
+  sleep 1
+  is_factory $pid && kill -TERM $pid 2>/dev/null
+  reply true "stopping now: pid $pid was told twice; a running session is cut off and its ticket put back" $pid
+}
+
+do_restart() {
+  local pid=$(alive)
+  require_controls "$pid"
+  mkdir -p $CACHE && touch $CACHE/drain
+  local waited=0
+  while (( waited < 3000 )); do
+    kill -0 $pid 2>/dev/null || break
+    [[ $(field phase) == stopped ]] && break
+    sleep 2
+    (( waited += 2 ))
+  done
+  if kill -0 $pid 2>/dev/null && [[ $(field phase) != stopped ]]; then
+    reply false "still draining after 50 minutes: not restarted" $pid 1
+  fi
+  sleep 1
+  do_start
+}
+
+do_poll() {
+  local pid=$(alive)
+  require_controls "$pid"
+  mkdir -p $CACHE && touch $CACHE/wake
+  reply true "asked the factory to check now" $pid
+}
+
+do_status() {
+  local pid json=$(status_json) is_alive=false is_controllable=false legacy=""
+  json=${json%%$'\n'}
+  if pid=$(alive); then
+    is_alive=true
+    if controllable $pid; then is_controllable=true; else legacy=",\"legacyPid\":$pid"; fi
+  fi
+  [[ -z $json ]] && json='{}'
+  local extra="\"alive\":$is_alive,\"controllable\":$is_controllable$legacy"
+  if [[ $json == '{}' ]]; then print -r -- "{\"ok\":true,\"message\":\"no status.json\",$extra}"
+  else print -r -- "{\"ok\":true,\"message\":\"status\",$extra,${json#\{}"; fi
+  exit 0
+}
+
+case "${1:-}" in
+  start) do_start ;;
+  stop) [[ ${2:-} == --now ]] && do_stop_now || do_stop ;;
+  restart) do_restart ;;
+  poll) do_poll ;;
+  status) do_status ;;
+  *) reply false "usage: factoryctl start|stop [--now]|restart|poll|status" "" 64 ;;
+esac

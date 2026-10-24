@@ -18,6 +18,7 @@ import {
 } from "./github.ts";
 import { pruneWorktrees, runSessions, type Session } from "./sandbox.ts";
 import { BRANCH_PREFIX, forbiddenChanges, kit, type Repo, RUNS, run } from "./shared.ts";
+import { log } from "./status.ts";
 
 export type Hooks = {
   writeTask: (issue: number, token: string) => Promise<void>;
@@ -35,13 +36,13 @@ async function fixRound(repo: Repo, pr: FactoryPr, round: Round, claudeToken: st
   const n = tried.length + 1;
   const issue = Number(pr.headRefName.slice(BRANCH_PREFIX.length));
   const branch = pr.headRefName;
-  console.log(`${repo.name} PR #${pr.number}: ${round.name}, round ${n} of ${round.max}`);
+  log(`${repo.name} PR #${pr.number}: ${round.name}, round ${n} of ${round.max}`);
   await hooks.writeTask(issue, token);
   run(repo, "git", ["fetch", "--quiet", "origin", "main", branch]);
   pruneWorktrees(repo);
   run(repo, "git", ["branch", "--force", branch, `origin/${branch}`]);
 
-  const { outcome } = await runSessions(repo, issue, branch, [round.session], round.inputs, claudeToken);
+  const { outcome } = await runSessions(repo, issue, branch, [round.session], round.inputs, claudeToken, pr.number);
   const fresh = await appToken(repo);
   const commits = run(repo, "git", ["rev-list", `origin/${branch}..${branch}`]);
   const forbidden = forbiddenChanges(repo, branch);
@@ -59,7 +60,7 @@ async function fixRound(repo: Repo, pr: FactoryPr, round: Round, claudeToken: st
   push(repo, fresh, branch); // fast-forward only
   comment(repo, fresh, pr.number, `${label}: ${outcome.summary}\n\n${roundMarker(round.kind, pr.headRefOid)}`);
   requestSecondOpinion(repo, fresh, pr.number); // the new commits haven't been read by anyone independent
-  console.log(`${repo.name} PR #${pr.number}: pushed ${label}`);
+  log(`${repo.name} PR #${pr.number}: pushed ${label}`);
 }
 
 export async function fixPrs(repo: Repo, claudeToken: string, hooks: Hooks) {
