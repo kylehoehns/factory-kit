@@ -26,6 +26,7 @@ import {
 } from "./findings.ts";
 import { floorTier, localFiles } from "./gate.ts";
 import { api, appToken, comment, gh, labels, openFactoryPrs, push, requestSecondOpinion } from "./github.ts";
+import { interruptLeftovers } from "./live.ts";
 import { fixPrs } from "./rounds.ts";
 import { pruneWorktrees, runSessions } from "./sandbox.ts";
 import {
@@ -256,6 +257,7 @@ if (!/^sk-ant-[A-Za-z0-9_-]+$/.test(claudeToken)) {
   );
 }
 const once = process.argv.includes("--once");
+interruptLeftovers();
 const names = kit()
   .repos.map((r) => r.slug)
   .join(", ");
