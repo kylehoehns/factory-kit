@@ -29,7 +29,7 @@ export function gh(repo: Repo, token: string, ...args: string[]): string {
 
 /** A comment on an issue or PR (they share numbers). */
 export function comment(repo: Repo, token: string, target: number, body: string) {
-  comment(repo, token, target, body);
+  gh(repo, token, "issue", "comment", String(target), "--body", body);
 }
 
 /** Adds and removes labels on an issue or PR, in one call. */
