@@ -134,7 +134,9 @@ async function reviewFindings(repo: Repo, claudeToken: string) {
 
 async function merges(repo: Repo) {
   const token = await appToken(repo);
-  await autoMerge(repo, token, openFactoryPrs(repo, token, BRANCH_PREFIX));
+  await autoMerge(repo, token, openFactoryPrs(repo, token, BRANCH_PREFIX), (pr, reason) =>
+    block(repo, token, pr, reason),
+  );
 }
 
 // --- 3. Follow-ups from merged PRs ---

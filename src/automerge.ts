@@ -97,10 +97,27 @@ async function qualifies(
   return undefined;
 }
 
-/** The last reason given for each PR waiting, so it is noted when it changes, not every pass. */
-const waiting = new Map<string, string | undefined>();
+/** Reasons that are the maintainer's to act on; the pane already lists each one. Any other wait is the machinery's. */
+const MAINTAINERS = ["not low tier", "labelled "];
+export const STUCK_MINUTES = 30;
 
-export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
+/** Whether a PR has waited on the machinery (CI, the risk gate, the second opinion, a thread) with one reason for too
+ *  long, so a person should look instead of the PR sitting silent. */
+export function isStuck(why: string | undefined, since: number, now: number): boolean {
+  if (!why || MAINTAINERS.some((m) => why.startsWith(m))) return false;
+  return now - since >= STUCK_MINUTES * 60_000;
+}
+
+/** Each PR's current wait: the reason and head commit, and since when. A new commit or a new reason starts the clock
+ *  over, and so does a factory restart. */
+const waiting = new Map<string, { why: string | undefined; sha: string; since: number }>();
+
+export async function autoMerge(
+  repo: Repo,
+  token: string,
+  prs: FactoryPr[],
+  block: (target: number, reason: string) => void,
+) {
   const mode = repo.config.autoMerge;
   if (mode === "off") return;
   const stopped = mode === "on" ? stopRuleTripped(repo, token) : undefined;
@@ -109,9 +126,16 @@ export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
     const why = await qualifies(repo, token, pr, approver);
     const key = `${repo.slug}#${pr.number}`;
     // Say once why a PR is waiting, so a green PR that never merges isn't silent.
-    if (why !== waiting.get(key)) {
-      waiting.set(key, why);
-      if (why) note("pr", repo.slug, `${repo.name} PR #${pr.number}: waiting: ${why}`, facts(pr));
+    const last = waiting.get(key);
+    if (why !== last?.why || pr.headRefOid !== last?.sha) {
+      waiting.set(key, { why, sha: pr.headRefOid, since: Date.now() });
+      if (why && why !== last?.why) note("pr", repo.slug, `${repo.name} PR #${pr.number}: waiting: ${why}`, facts(pr));
+    }
+    // And hand it to a person if that wait isn't theirs and doesn't end.
+    if (isStuck(why, waiting.get(key)?.since ?? Date.now(), Date.now())) {
+      block(pr.number, `this PR has waited ${STUCK_MINUTES} minutes with nothing for the factory to do: ${why}.`);
+      waiting.delete(key);
+      continue;
     }
     if (why !== undefined) continue;
     const comments = gh(
