@@ -1,5 +1,5 @@
-# The kit's own checks. The factory doesn't work on this repo: every change is made by hand and merged by the
-# maintainer.
+# The kit's own checks, required on every PR to main. The factory doesn't work on this repo: every change is made by
+# hand, gets the second opinion (second-review.yml), and is merged by the maintainer.
 name: ci
 
 on:

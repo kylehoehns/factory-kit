@@ -22,6 +22,10 @@
 - Tests sit next to the code (`src/x.test.ts`) and use `node:test`. Put decisions in pure functions (as `gate.ts`,
   `dispatch.ts` and `findings.ts` do) and test those; keep GitHub plumbing thin.
 
+## Changes
+- The factory doesn't work on this repo. Every change is a PR with the `claude-review` label (`gh pr create --label
+  claude-review`); `main` takes no direct pushes and needs `ci` green. The maintainer reads the second opinion and merges.
+
 ## Releasing
 - Repos call the workflows at `@v1` and run the loop from a clone. After a change merges, tag `v1.x.y` and move `v1`
   to it. A change that breaks an existing `.factory/config.yml` or a workflow's inputs needs `v2`.
