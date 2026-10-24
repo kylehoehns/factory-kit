@@ -62,7 +62,7 @@ Only one factory runs per machine: a second start says which pid is already runn
 | `factoryctl poll` | Ends the wait between passes, so the factory checks GitHub now. |
 | `factoryctl status` | `status.json`, plus whether the factory is alive and controllable. |
 
-In a terminal, the first Ctrl+C drains the same way and the second stops now. Ctrl+C also reaches the processes the factory started in that terminal, so `factoryctl stop` is the cleaner drain.
+In a terminal, the first Ctrl+C drains the same way, and a second Ctrl+C at least 2 seconds later stops now. (Under `npm run`, one Ctrl+C reaches the factory twice, so a repeat within 2 seconds counts as the same press.) Ctrl+C also reaches the processes the factory started in that terminal, so `factoryctl stop` is the cleaner drain.
 
 A factory started before these controls existed doesn't write `status.json`, so `factoryctl` won't stop it. Stop that one once in its own terminal with Ctrl+C (between sessions), then run `factoryctl start`. From then on everything works from here or the pane.
 

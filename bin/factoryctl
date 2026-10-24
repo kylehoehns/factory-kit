@@ -110,7 +110,7 @@ do_stop_now() {
   require_controls "$pid"
   is_factory $pid || reply false "pid $pid is no longer the factory: nothing sent" $pid 1
   kill -TERM $pid 2>/dev/null
-  sleep 1
+  sleep 3 # the factory treats a repeat within 2s as the same signal
   is_factory $pid && kill -TERM $pid 2>/dev/null
   reply true "stopping now: pid $pid was told twice; a running session is cut off and its ticket put back" $pid
 }

@@ -6,8 +6,16 @@ import { test } from "node:test";
 import type { Repo } from "./shared.ts";
 
 process.env.FACTORY_CACHE_DIR = mkdtempSync(join(tmpdir(), "factory-cache-"));
-const { buildUntilDrained, finishDrain, releaseOrphans, sessionSignal, signalHandler, sleepUntilNextPass, stopNow } =
-  await import("./control.ts");
+const {
+  buildUntilDrained,
+  clearControlFiles,
+  finishDrain,
+  releaseOrphans,
+  sessionSignal,
+  signalHandler,
+  sleepUntilNextPass,
+  stopNow,
+} = await import("./control.ts");
 const { initStatus, paths, writeStatus } = await import("./status.ts");
 
 test("the drain file stops claims after the build that is running, then the factory writes phase 'stopped'", async () => {
@@ -61,7 +69,28 @@ test("the wake file ends the sleep between passes early, and is removed", async 
   assert.equal(existsSync(paths().wake), false);
 });
 
+test("one Ctrl+C delivered twice within 2s (npm forwards it, the terminal signals the group) only drains", () => {
+  let clock = 1_000_000;
+  let drained = 0;
+  let stopped = 0;
+  const handle = signalHandler(
+    () => drained++,
+    () => {
+      stopped++;
+    },
+    () => clock,
+  );
+  handle();
+  clock += 50;
+  handle();
+  clock += 1900;
+  handle();
+  assert.equal(drained, 1);
+  assert.equal(stopped, 0);
+});
+
 test("the first signal drains; the second aborts every session's signal", () => {
+  let clock = 1_000_000;
   const signal = sessionSignal(60_000);
   let drained = 0;
   let stopped = 0;
@@ -70,15 +99,36 @@ test("the first signal drains; the second aborts every session's signal", () => 
     () => {
       stopped++;
     },
+    () => clock,
   );
   handle();
   assert.equal(drained, 1);
   assert.equal(signal.aborted, false);
   assert.equal(existsSync(paths().drain), false); // a signal drains in memory; the file is factoryctl's
+  clock += 2500;
   handle();
   assert.equal(stopped, 1);
   assert.equal(stopNow.signal.aborted, true);
   assert.equal(signal.aborted, true);
+});
+
+test("a drain or wake file left by a stop now or a crash is cleared, so the next start does not drain at once", () => {
+  writeFileSync(paths().drain, "");
+  writeFileSync(paths().wake, "");
+  clearControlFiles();
+  assert.equal(existsSync(paths().drain), false);
+  assert.equal(existsSync(paths().wake), false);
+  clearControlFiles(); // nothing there: still fine
+});
+
+test("startup and stop now both clear the control files; factoryctl spaces its two TERMs past the repeat window", () => {
+  const factory = readFileSync(join(import.meta.dirname, "factory.ts"), "utf8");
+  assert.ok(factory.indexOf("clearControlFiles();") > factory.indexOf("acquireLock()"));
+  assert.match(factory, /clearControlFiles\(\);\n\s*releaseLock\(\);\n\s*process\.exit\(130\)/);
+  assert.match(
+    readFileSync(join(import.meta.dirname, "..", "bin", "factoryctl"), "utf8"),
+    /kill -TERM \$pid[^\n]*\n\s*sleep 3/,
+  );
 });
 
 test("no SIGUSR1 handler anywhere in the kit", () => {

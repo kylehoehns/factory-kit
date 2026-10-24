@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { autoMerge } from "./automerge.ts";
 import {
   buildUntilDrained,
+  clearControlFiles,
   draining,
   finishDrain,
   releaseOrphans,
@@ -312,6 +313,7 @@ initStatus({
 });
 setInterval(() => writeStatus({}), 15_000).unref(); // the heartbeat: a stale beatAt means a stuck factory
 interruptLeftovers();
+clearControlFiles(); // a drain file left by a stop now or a crash would make this start drain and exit at once
 
 let opened: Repo[] = [];
 for (const { slug, path } of kit().repos) {
@@ -330,8 +332,8 @@ const stopSignal = signalHandler(
     const current = currentStatus()?.current;
     log(
       current
-        ? `Draining: finishing ${current.repo}#${current.issue}, then stopping. Ctrl+C / SIGTERM again to stop now.`
-        : "Draining: nothing is running, so stopping after this step. Ctrl+C / SIGTERM again to stop now.",
+        ? `Draining: finishing ${current.repo}#${current.issue}, then stopping. Ctrl+C again (2s or more later) to stop now.`
+        : "Draining: nothing is running, so stopping after this step. Ctrl+C again (2s or more later) to stop now.",
     );
   },
   async () => {
@@ -348,6 +350,7 @@ const stopSignal = signalHandler(
       }
     }
     writeStatus({ phase: "stopped", current: undefined, step: undefined });
+    clearControlFiles();
     releaseLock();
     process.exit(130);
   },

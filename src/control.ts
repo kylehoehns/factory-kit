@@ -2,7 +2,9 @@
 //
 //   drain         a drain file (bin/factoryctl stop), or the first Ctrl+C / SIGTERM: no new claims; the running
 //                 session finishes and publishes as usual, then the factory stops
-//   stop now      a second Ctrl+C / SIGTERM: the running session is aborted and its ticket goes back in the queue
+//   stop now      a second Ctrl+C / SIGTERM, at least 2s after the first: the running session is aborted and its
+//                 ticket goes back in the queue. One Ctrl+C under `npm run` arrives twice (npm forwards it, and the
+//                 terminal signals the whole group), so a repeat within 2s counts as the same press.
 //   wake          a wake file (bin/factoryctl poll): the sleep between passes ends and a pass starts now
 //
 // Only SIGINT and SIGTERM are handled, on purpose: no other signal stops a session, and nothing here sends one.
@@ -76,6 +78,15 @@ export async function buildUntilDrained<T>(
   }
 }
 
+/**
+ * Removes a leftover drain or wake file. Called at startup (after the lock) and on stop now, so a stop never leaves
+ * a drain file behind that would make the next start drain and exit at once.
+ */
+export function clearControlFiles() {
+  take(paths().drain);
+  take(paths().wake);
+}
+
 /** Once draining and nothing runs: the drain file and pidfile go, and the caller exits 0. */
 export function finishDrain(writeStopped: () => void, releaseLock: () => void) {
   writeStopped();
@@ -83,15 +94,26 @@ export function finishDrain(writeStopped: () => void, releaseLock: () => void) {
   releaseLock();
 }
 
+/** A repeat signal this soon after the first is the same Ctrl+C delivered twice, not a second press. */
+export const REPEAT_MS = 2000;
+
 /**
- * SIGINT and SIGTERM. The first drains; the second stops now: `onStopNow` cleans up and exits. Returns the handler,
- * which the caller installs with process.on.
+ * SIGINT and SIGTERM. The first drains; the second stops now: `onStopNow` cleans up and exits. A signal within
+ * REPEAT_MS of the first is ignored (see the top of this file). Returns the handler, which the caller installs with
+ * process.on.
  */
-export function signalHandler(onDrain: () => void, onStopNow: () => void | Promise<void>) {
+export function signalHandler(
+  onDrain: () => void,
+  onStopNow: () => void | Promise<void>,
+  now: () => number = Date.now,
+) {
   let signals = 0;
+  let firstAt = 0;
   return () => {
+    if (signals === 1 && now() - firstAt < REPEAT_MS) return;
     signals++;
     if (signals === 1) {
+      firstAt = now();
       requestDrain();
       onDrain();
       return;
