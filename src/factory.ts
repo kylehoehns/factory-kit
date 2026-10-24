@@ -1,0 +1,218 @@
+// The factory, run on the maintainer's machine: `npm run factory`. It keeps running and, every `pollSeconds`, does
+// this for each repo in factory.yml (`npm run factory -- --once` does it once and exits):
+//
+//   1. fix      a factory PR that conflicts with main gets a session that merges main in; one whose `ci` check
+//               failed gets a session with the failure log; each capped, then labelled agent:blocked (rounds.ts)
+//   2. review   a factory PR's second opinion is triaged: blockers get a fix round, one-way doors are labelled
+//               decision-needed, follow-ups are listed on the PR (findings.ts)
+//   +  merge    low-risk PRs with everything green and resolved, and PRs a maintainer approved (automerge.ts)
+//   3. follow-ups  when a factory PR merges, its follow-ups are filed as needs-triage tickets
+//   4. tickets  ready tickets, up to the work-in-progress limit across all repos, are implemented and reviewed in a
+//               sandbox, then published as a PR by the factory app
+//
+// Agents never hold a GitHub credential: github.ts does, with the app key from the macOS keychain.
+
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { autoMerge } from "./automerge.ts";
+import { claim, loadTickets, pick, workInProgress, writeTask } from "./dispatch.ts";
+import { addFollowUps, fileFollowUps, type Finding, flagDecisions, settleFindings, triageSecondOpinion } from "./findings.ts";
+import { floorTier, localFiles } from "./gate.ts";
+import { api, appToken, gh, openFactoryPrs, push, requestSecondOpinion } from "./github.ts";
+import { fixPrs } from "./rounds.ts";
+import { pruneWorktrees, runSessions } from "./sandbox.ts";
+import { BRANCH_PREFIX, forbiddenChanges, keychain, kit, openRepo, type Outcome, type Repo, run, RUNS } from "./shared.ts";
+
+type Review = { summary: string; findings: Finding[] };
+
+const taskFile = (repo: Repo) => join(repo.root, RUNS, "task.md");
+
+function block(repo: Repo, token: string, target: number, reason: string) {
+  gh(repo, token, "issue", "edit", String(target), "--add-label", "agent:blocked");
+  try {
+    gh(repo, token, "issue", "edit", String(target), "--remove-label", "agent:in-progress");
+  } catch {
+    // PRs never carry it
+  }
+  gh(repo, token, "issue", "comment", String(target), "--body",
+    `The factory stopped: ${reason}\n\nA human needs to look. Remove \`agent:blocked\` to let the factory try again.`);
+  console.log(`${repo.name}#${target}: blocked: ${reason}`);
+}
+
+/** Pocock's needs-info: leave the questions on the ticket and move on; answers arrive as comments. */
+function ask(repo: Repo, token: string, issue: number, outcome: Outcome) {
+  const questions = (outcome.questions ?? []).map((q, i) => `${i + 1}. ${q}`).join("\n");
+  gh(repo, token, "issue", "comment", String(issue), "--body",
+    `The factory has questions before it can build this ticket.\n\n${questions || outcome.summary}\n\n` +
+      "Answer in a comment, then re-apply `ready-for-agent`. The next run reads every comment on this ticket.");
+  gh(repo, token, "issue", "edit", String(issue), "--add-label", "needs-info", "--remove-label", "ready-for-agent",
+    "--remove-label", "agent:in-progress");
+  console.log(`${repo.name}#${issue}: needs-info (${outcome.questions?.length ?? 0} question(s))`);
+}
+
+// --- 1. Fix rounds: red CI, and conflicts with main (rounds.ts) ---
+
+async function fixFactoryPrs(repo: Repo, claudeToken: string) {
+  await fixPrs(repo, claudeToken, {
+    writeTask: (issue, token) => writeTask(repo, token, issue, taskFile(repo)),
+    block: (token, target, reason) => block(repo, token, target, reason),
+  });
+}
+
+// --- 2. Second opinions on factory PRs ---
+
+async function reviewFindings(repo: Repo, claudeToken: string) {
+  const token = await appToken(repo);
+  for (const pr of openFactoryPrs(repo, token, BRANCH_PREFIX)) {
+    if (pr.labels.some((l) => l.name === "agent:blocked")) continue;
+    const issue = Number(pr.headRefName.slice(BRANCH_PREFIX.length));
+    await triageSecondOpinion(repo, token, pr.number, pr.headRefName, issue, claudeToken, () => appToken(repo),
+      (target, reason) => block(repo, token, target, reason), () => writeTask(repo, token, issue, taskFile(repo)));
+  }
+}
+
+// --- Merging: low-risk PRs by stage, approved PRs always ---
+
+async function merges(repo: Repo) {
+  const token = await appToken(repo);
+  await autoMerge(repo, token, openFactoryPrs(repo, token, BRANCH_PREFIX));
+}
+
+// --- 3. Follow-ups from merged PRs ---
+
+async function followUps(repo: Repo) {
+  fileFollowUps(repo, await appToken(repo), BRANCH_PREFIX);
+}
+
+// --- 4. Building tickets ---
+
+/** The factory reviewer's findings as a GitHub review from the app, inline where GitHub accepts the line. */
+async function postReview(repo: Repo, token: string, pr: number, review: Review) {
+  const text = (f: Finding) => `[${f.kind}] **${f.title}**: ${f.body}`;
+  const asLine = (f: Finding) => `- ${f.path ? `\`${f.path}${f.line ? `:${f.line}` : ""}\`: ` : ""}${text(f)}`;
+  const post = (inline: Finding[], inBody: Finding[]) =>
+    api(repo, token, `/pulls/${pr}/reviews`, {
+      method: "POST",
+      body: JSON.stringify({
+        event: "COMMENT",
+        body: ["**Factory review** (fresh session, `code-review` skill)", review.summary, ...inBody.map(asLine)].join("\n\n"),
+        comments: inline.map((f) => ({ path: f.path, line: f.line, side: "RIGHT", body: text(f) })),
+      }),
+    });
+  const inline = review.findings.filter((f) => f.path && f.line);
+  try {
+    await post(inline, review.findings.filter((f) => !inline.includes(f)));
+  } catch {
+    // A line outside the diff makes GitHub reject the whole review; keep every finding in the body instead.
+    await post([], review.findings).catch((e) => console.log(`${repo.name} PR #${pr}: could not post the factory review: ${e}`));
+  }
+  addFollowUps(repo, token, pr, review.findings.filter((f) => f.kind === "follow-up"));
+  flagDecisions(repo, token, pr, review.findings.filter((f) => f.kind === "one-way-door"));
+  // What the reviewer already fixed, or deferred to a ticket, needs no one's attention: resolve those threads.
+  await settleFindings(repo, token, pr, review.findings.filter((f) => f.kind === "fixed" || f.kind === "follow-up"));
+}
+
+async function publish(repo: Repo, token: string, issue: number, prBody: string | undefined, review: Review | undefined) {
+  const branch = `${BRANCH_PREFIX}${issue}`;
+  if (!run(repo, "git", ["rev-list", `origin/main..${branch}`])) {
+    return block(repo, token, issue, "the agents reported success but made no commits.");
+  }
+  const forbidden = forbiddenChanges(repo, branch);
+  if (forbidden.length) return block(repo, token, issue, `the branch changes the factory's own controls: ${forbidden.join(", ")}.`);
+
+  push(repo, token, branch, true); // a fresh branch from main; replaces any earlier attempt
+  const title = gh(repo, token, "issue", "view", String(issue), "--json", "title", "--jq", ".title");
+  const body = prBody?.includes(`Closes #${issue}`) ? prBody : `${prBody ?? ""}\n\nCloses #${issue}\n`;
+  const url = gh(repo, token, "pr", "create", "--base", "main", "--head", branch, "--title", title, "--body", body);
+  const pr = Number(url.split("/").pop());
+  gh(repo, token, "issue", "edit", String(issue), "--remove-label", "agent:in-progress");
+  if (review) await postReview(repo, token, pr, review);
+
+  // Every factory PR gets the independent second opinion; its pass can make a small PR low.
+  requestSecondOpinion(repo, token, pr);
+  const { tier } = floorTier(localFiles(repo.root, `origin/main...${branch}`), repo.config.risk, "factory", true, "");
+  console.log(`${repo.name}#${issue}: ${url} (${tier} risk before the second opinion)`);
+}
+
+async function build(repo: Repo, issue: number, claudeToken: string) {
+  const branch = `${BRANCH_PREFIX}${issue}`;
+  try {
+    run(repo, "git", ["fetch", "--quiet", "origin", "main"]);
+    pruneWorktrees(repo);
+    run(repo, "git", ["branch", "--force", branch, "origin/main"]);
+    const { outcome, read } = await runSessions(repo, issue, branch,
+      [{ role: "implement", prompt: "implement.md" }, { role: "review", prompt: "review.md" }], [taskFile(repo)], claudeToken);
+    const token = await appToken(repo);
+    if (outcome.outcome === "success") {
+      const review = read("review.json");
+      await publish(repo, token, issue, read("pr-body.md"), review ? (JSON.parse(review) as Review) : undefined);
+    } else if (outcome.outcome === "question") ask(repo, token, issue, outcome);
+    else block(repo, token, issue, outcome.summary);
+  } catch (error) {
+    block(repo, await appToken(repo), issue, `the run failed: ${(error as Error).message}`);
+  }
+}
+
+/** One ticket at a time, across every repo, while the shared work-in-progress limit allows. */
+async function buildTickets(repos: Repo[], claudeToken: string) {
+  for (;;) {
+    let wip = 0;
+    for (const repo of repos) wip += await workInProgress(repo, await appToken(repo));
+    let next: { repo: Repo; issue: number } | undefined;
+    for (const repo of repos) {
+      const token = await appToken(repo);
+      const ticket = pick(await loadTickets(repo, token), wip, kit().wipLimit, repo.config.maintainers);
+      if (ticket) {
+        next = { repo, issue: ticket.number };
+        await claim(repo, token, ticket.number);
+        await writeTask(repo, token, ticket.number, taskFile(repo));
+        break;
+      }
+    }
+    if (!next) {
+      console.log("No ready ticket, or the work-in-progress limit is reached.");
+      return;
+    }
+    await build(next.repo, next.issue, claudeToken);
+  }
+}
+
+// --- The loop ---
+
+const claudeToken = keychain(kit().keychain.claudeToken);
+// Fail before touching GitHub: a wrong keychain item otherwise surfaces as "Not logged in" inside the sandbox.
+if (!/^sk-ant-[A-Za-z0-9_-]+$/.test(claudeToken)) {
+  throw new Error(`The keychain item '${kit().keychain.claudeToken}' doesn't look like a Claude token (sk-ant-...). ` +
+    "Re-run bin/setup-keychain.sh --token with the output of 'claude setup-token'.");
+}
+const once = process.argv.includes("--once");
+const names = kit().repos.map((r) => r.slug).join(", ");
+console.log(once ? `Factory: one pass over ${names}.` : `Factory: watching ${names} every ${kit().pollSeconds}s. Ctrl+C to stop.`);
+for (;;) {
+  const repos: Repo[] = [];
+  for (const { slug, path } of kit().repos) {
+    try {
+      const repo = openRepo(slug, path);
+      mkdirSync(join(repo.root, RUNS), { recursive: true });
+      repos.push(repo);
+    } catch (error) {
+      console.log(`${slug}: skipped this pass: ${(error as Error).message}`); // a bad config.yml stops only its repo
+    }
+  }
+  for (const repo of repos) {
+    for (const step of [fixFactoryPrs, reviewFindings, merges, followUps]) {
+      try {
+        await step(repo, claudeToken);
+      } catch (error) {
+        console.log(`${repo.name} ${step.name}: ${(error as Error).message}`); // keep watching; the next pass retries
+      }
+    }
+  }
+  try {
+    await buildTickets(repos, claudeToken);
+  } catch (error) {
+    console.log(`buildTickets: ${(error as Error).message}`);
+  }
+  if (once) break;
+  await new Promise((resolve) => setTimeout(resolve, kit().pollSeconds * 1000));
+}

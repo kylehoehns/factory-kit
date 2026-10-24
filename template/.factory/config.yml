@@ -1,0 +1,44 @@
+# How the factory treats this repo. The factory and the risk gate read this file from main, never from a PR, so a PR
+# can't loosen the rules that judge it. Keep `.factory/` in risk.high.paths below.
+
+# The command that means "done": agents run it before they finish, and CI should run it too.
+check: just check
+
+# Low-risk PRs: off (nothing merges by itself), shadow (the factory comments "would auto-merge"), or on.
+# Start in shadow and compare its calls with yours before turning it on.
+autoMerge: shadow
+
+maintainers: [your-github-login]
+# Your factory GitHub App's bot login. Its PRs are trusted like a maintainer's.
+factoryBot: your-factory-bot[bot]
+
+# The factory's own controls: agents may never change these, and the factory re-checks before it pushes.
+protected: [.github/, .factory/, .agents/, .claude/]
+
+sandbox:
+  # true starts a private Docker daemon next to the sandbox (for Testcontainers and the like).
+  docker: false
+  # Directories kept between runs on your machine, so each run doesn't download every dependency again.
+  caches: []
+  #  - { name: pnpm, path: /home/agent/.local/share/pnpm }
+
+# low    -> all checks green, then the factory merges it (when autoMerge is on)
+# medium -> a maintainer approves the head commit, then the factory merges it
+# high   -> a maintainer approves, and the independent second opinion has read the head commit
+# A PR's tier is the highest floor any rule puts it at; anything no rule mentions is medium.
+# Paths are globs where "*" also matches "/".
+risk:
+  low:
+    paths: ["docs/*", "*.md"]
+    exclude: [AGENTS.md, CLAUDE.md, "docs/adr/*"]
+    maxChangedLines: 100
+    # A PR that only adds files here, and edits or deletes nothing, is low at any size.
+    testPaths: []
+    # A PR the second opinion passed is low if it changes at most this many lines here (tests don't count).
+    reviewedProductionPaths: []
+    reviewedMaxProductionLines: 200
+  medium:
+    # Changing or deleting anything already here (adding new files is ordinary work), e.g. end-to-end tests.
+    existingPaths: []
+  high:
+    paths: [".github/*", ".factory/*", ".agents/*", ".claude/*"]

@@ -1,0 +1,23 @@
+{
+  "name": "factory-kit",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A software factory for GitHub repos: agents build tickets in local sandboxes, a risk gate decides how much review each PR needs.",
+  "license": "MIT",
+  "engines": { "node": ">=26" },
+  "scripts": {
+    "factory": "node src/factory.ts",
+    "build-images": "node src/build-images.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'src/*.test.ts'"
+  },
+  "dependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "5.9.3"
+  }
+}

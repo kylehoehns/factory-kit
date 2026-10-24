@@ -1,0 +1,113 @@
+# The independent second opinion, as a reusable workflow. A repo calls it when a PR gets the `claude-review` label
+# (see template/.github/workflows/second-review.yml): the factory adds the label to every PR it opens, and again after
+# each round that pushes new commits; the maintainer can add it to any PR.
+#
+# Independent means a different system from the factory that wrote and reviewed the code: a prompt read from this
+# workflow, not from the factory, comments only, and a capped number of turns. Its verdict is posted as the
+# `second-opinion` status on the commit it read; the risk gate counts a pass toward the low tier.
+name: second-opinion
+
+on:
+  workflow_call:
+    inputs:
+      allowed-bots:
+        description: The factory app's slug. The action refuses bot-started runs unless the bot is named; never '*'.
+        type: string
+        required: true
+      model:
+        description: Sonnet keeps usage modest; a stronger model gives a stronger (pricier) opinion.
+        type: string
+        default: claude-sonnet-5-5
+      kit-ref:
+        type: string
+        default: v1
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  second-opinion:
+    if: github.event.label.name == 'claude-review' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write
+      id-token: write
+    steps:
+      - name: Note the start time, so only this run's opinion counts
+        run: echo "STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Second opinion
+        uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: ${{ inputs.allowed-bots }}
+          prompt: |
+            You are the independent second reviewer for pull request ${{ github.repository }}#${{ github.event.pull_request.number }}.
+            If you find nothing below, it may merge with no person reading it, so check it as if that were true.
+
+            Read the diff with `gh pr diff ${{ github.event.pull_request.number }}` and the description with
+            `gh pr view ${{ github.event.pull_request.number }}`. The description says which ticket it closes; read that
+            ticket with its comments, `gh issue view <number> --comments`, and read CODING_STANDARDS.md if it exists.
+            A comment headed "Agent Brief" is part of the ticket: where it differs from the body, the brief is what was
+            asked for. Then check:
+            - The ticket: everything it asks for is there and works, and nothing it didn't ask for was added.
+            - The coding standards: a clear break of a rule in CODING_STANDARDS.md. Style and taste are not breaks.
+            And look for what could go wrong in production:
+            - Who can do what: defaults that make something public, missing permission checks, data one user can
+              see or change that belongs to another.
+            - Personal data: user details exposed in responses, logs, errors or published files.
+            - Schema, migrations and published data: anything hard to undo, data that could be lost, a contract other
+              code or other people rely on changing shape.
+            - Secrets and credentials: anything that would be unsafe in a public repository.
+
+            Sort each problem into one kind:
+            - blocker: introduced by this PR, and you can show how it goes wrong (an attack path, a request that
+              leaks data, a migration that loses data), or something the ticket asks for that is missing or wrong,
+              scope the ticket didn't ask for, or a clear break of a coding standard. The factory fixes blockers.
+            - one-way-door: expensive to undo later (schema, public API, published data) and a decision for the maintainer.
+            - follow-up: real but not proven, or not introduced by this PR. It becomes a ticket after merge.
+            Leave out style and taste entirely.
+
+            Post each problem as an inline comment on the line it's about, starting with its kind in brackets and
+            its title in bold (for example "[blocker] **Organizer list is public**"), then what could happen and what
+            you'd change. Use the same title in the findings block below: the factory matches them to answer threads.
+            Then post one summary comment that starts with "Second opinion", lists the problems or says plainly that
+            you found none, and ends with a fenced code block tagged `findings` holding a JSON array, one object per
+            problem: {"kind": "blocker" | "one-way-door" | "follow-up", "title": "<under 70 characters>", "path": "<file>",
+            "line": <line>, "body": "<what could happen and what you'd change>"}. Use [] when there are none.
+            Don't approve or request changes: the maintainer decides.
+          claude_args: >-
+            --model ${{ inputs.model }} --max-turns 20
+            --allowedTools "Read,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
+
+      - name: Check out the factory kit
+        if: always()
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kylehoehns/factory-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .factory-kit
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: always()
+        with:
+          node-version-file: .factory-kit/.nvmrc
+
+      # Read the opinion back and pin the verdict to the commit that was reviewed.
+      - name: Record the verdict on the reviewed commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .factory-kit/src/verdict-cli.ts

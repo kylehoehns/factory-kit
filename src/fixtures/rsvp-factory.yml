@@ -1,0 +1,66 @@
+# How the factory treats this repo. See docs/adr/0003-risk-tiers-for-a-single-maintainer.md.
+#
+# The factory and the risk gate read this file from the BASE branch, never from a PR, so a PR can't loosen the rules
+# that judge it. Changing it is itself high risk.
+
+# The command that means "done": agents run it before they finish, and CI runs it too.
+check: ./gradlew check
+
+# Low-risk PRs: off, shadow (comment "would auto-merge"), or on (merge them). ADR 0006.
+autoMerge: "on"
+
+maintainers: [kylehoehns]
+# The factory's GitHub App. Its PRs are trusted like the maintainer's.
+factoryBot: rsvp-factory-bot[bot]
+
+# The factory's own controls. Agents may never change these: the hooks block it, and the factory re-checks before it
+# pushes.
+protected: [.github/, .factory/, .agents/, .claude/, .githooks/, scripts/]
+
+sandbox:
+  # A private Docker daemon for the sandbox, so Testcontainers works without reaching the host's Docker.
+  docker: true
+  # Kept between runs on the maintainer's machine, so each run doesn't download every dependency again.
+  caches:
+    - { name: gradle, path: /home/agent/.gradle }
+
+# Tiers:   low    -> all checks green, then the factory merges it
+#          medium -> the maintainer approves the head commit
+#          high   -> the maintainer approves, plus the independent second opinion
+# A PR's tier is the highest floor any rule below puts it at. Anything no rule mentions is medium.
+# Paths are globs where "*" also matches "/".
+risk:
+  low:
+    # Every changed file must match one of these, and none of the exclusions, and the PR must be small.
+    paths: ["docs/*", "*.md"]
+    exclude: [AGENTS.md, CLAUDE.md, GLOSSARY.md, "docs/adr/*", "docs/agents/*", ".agents/*"]
+    maxChangedLines: 100
+    # A PR that only adds tests is low at any size: it changes no production code, so it can only add coverage.
+    # Editing or deleting a test line is not "only adds" and stays medium.
+    testPaths: ["app/src/test/*", "acceptance/src/test/*"]
+    # A PR is also low when the independent second opinion passed its head commit (it matches the ticket and
+    # CODING_STANDARDS.md, with no blocker or one-way door) and it changes little production code. Tests don't count
+    # toward the limit. A later commit the second opinion hasn't read loses the pass until it runs again. High paths,
+    # edits to existing acceptance scenarios, outside authors and one-way doors still raise the tier.
+    reviewedProductionPaths: ["app/src/main/*"]
+    reviewedMaxProductionLines: 200
+  medium:
+    # Changing or deleting anything already in the acceptance suite (adding new files is ordinary work). ADR 0002.
+    existingPaths: ["acceptance/*"]
+  high:
+    # The identity module, schema changes, and the factory's own controls.
+    paths:
+      - "app/src/main/java/dev/rsvpfactory/identity/*"
+      - "app/src/main/resources/db/migration/*"
+      - ".github/*"
+      - ".factory/*"
+      - ".agents/*"
+      - ".claude/*"
+      - ".githooks/*"
+      - "scripts/*"
+      - "build-logic/*"
+      - "gradle/*"
+      - "*.gradle.kts"
+      - gradle.properties
+      - gradlew
+      - gradlew.bat

@@ -1,0 +1,27 @@
+# Calls factory-kit's risk gate. pull_request_target runs this file from the base branch, never from the PR.
+name: risk-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
+  # The second opinion's pass can lower a PR to low, so judge again once it has posted.
+  workflow_run:
+    workflows: [second-review]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: risk-gate-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+  # Let a superseded run finish: a cancelled run shows up on the PR as a red, failed risk-gate check.
+  cancel-in-progress: false
+
+jobs:
+  risk-gate:
+    uses: kylehoehns/factory-kit/.github/workflows/risk-gate.yml@v1

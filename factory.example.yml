@@ -1,0 +1,25 @@
+# The factory's own settings, on your machine. Copy to factory.yml (gitignored) and fill in.
+
+# Your factory's GitHub App: its ID, its slug, and its bot user's ID (gh api '/users/<slug>[bot]' --jq .id).
+app: { id: 1234567, slug: my-factory-bot, userId: 123456789 }
+
+# macOS keychain item names, as stored by bin/setup-keychain.sh.
+keychain: { appKey: factory-app-key, claudeToken: factory-claude-token }
+
+# At most this many tickets being built or PRs open, across all repos together.
+wipLimit: 3
+pollSeconds: 60
+
+# Fix rounds before a PR is labelled agent:blocked for a person.
+rounds: { ci: 2, review: 2, update: 2 }
+
+sessions:
+  implement: { model: claude-sonnet-5-5, timeoutMinutes: 45 }
+  review: { model: claude-sonnet-5-5, timeoutMinutes: 20 }
+  fixCi: { model: claude-sonnet-5-5, timeoutMinutes: 30 }
+  fixReview: { model: claude-sonnet-5-5, timeoutMinutes: 30 }
+  updateBranch: { model: claude-sonnet-5-5, timeoutMinutes: 30 }
+
+# The repos to watch, and where each one's clone is.
+repos:
+  - { slug: me/my-repo, path: ~/dev/my-repo }

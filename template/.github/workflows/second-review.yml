@@ -1,0 +1,22 @@
+# Calls factory-kit's independent second opinion when a PR gets the `claude-review` label.
+# Needs the CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`, or /install-github-app).
+name: second-review
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  second-review:
+    if: github.event.label.name == 'claude-review'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write
+      id-token: write
+    uses: kylehoehns/factory-kit/.github/workflows/second-opinion.yml@v1
+    with:
+      allowed-bots: your-factory-bot
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
