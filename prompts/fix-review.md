@@ -6,5 +6,5 @@ The blocking findings are in `{{FINDINGS_FILE}}` (JSON), and the ticket and its 
 2. Keep to the findings: this is not the moment to refactor or widen the ticket.
 3. Run `{{CHECK}}` until it's green.
 4. Commit on the current branch with messages that end with `(#{{ISSUE}})`. Leave pushing to the factory.
-5. Write `{{RESOLUTIONS_FILE}}` as JSON, one entry per finding, so the factory can answer each review thread: `[{"title": "<the finding's title, exactly as given>", "status": "fixed" | "declined", "note": "<one or two sentences: how you fixed it, or why the finding is mistaken>"}]`.
+5. Write `{{RESOLUTIONS_FILE}}` as JSON, one entry per finding, so the factory can answer each review thread: `[{"id": <the finding's id>, "status": "fixed" | "declined", "note": "<one or two sentences: how you fixed it, or why the finding is mistaken>"}]`.
 6. Write `{{OUTCOME_FILE}}` as JSON: `{"outcome": "success" | "blocked", "summary": "<for the PR: each finding, and what you changed or why it was mistaken>"}`. Use `blocked` when a finding can't be fixed without a decision the ticket doesn't settle, and say which.

@@ -34,11 +34,12 @@ import {
   type Finding,
   fileFollowUps,
   flagDecisions,
+  postFindings,
   settleFindings,
   triageSecondOpinion,
 } from "./findings.ts";
 import { floorTier, localFiles } from "./gate.ts";
-import { api, appToken, comment, gh, labels, openFactoryPrs, push, requestSecondOpinion } from "./github.ts";
+import { appToken, comment, gh, labels, openFactoryPrs, push, requestSecondOpinion } from "./github.ts";
 import { interruptLeftovers } from "./live.ts";
 import { fixPrs } from "./rounds.ts";
 import { pruneWorktrees, runSessions } from "./sandbox.ts";
@@ -146,49 +147,34 @@ async function followUps(repo: Repo) {
 
 /** The factory reviewer's findings as a GitHub review from the app, inline where GitHub accepts the line. */
 async function postReview(repo: Repo, token: string, pr: number, review: Review) {
-  const text = (f: Finding) => `[${f.kind}] **${f.title}**: ${f.body}`;
-  const asLine = (f: Finding) => `- ${f.path ? `\`${f.path}${f.line ? `:${f.line}` : ""}\`: ` : ""}${text(f)}`;
-  const post = (inline: Finding[], inBody: Finding[]) =>
-    api(repo, token, `/pulls/${pr}/reviews`, {
-      method: "POST",
-      body: JSON.stringify({
-        event: "COMMENT",
-        body: ["**Factory review** (fresh session, `code-review` skill)", review.summary, ...inBody.map(asLine)].join(
-          "\n\n",
-        ),
-        comments: inline.map((f) => ({ path: f.path, line: f.line, side: "RIGHT", body: text(f) })),
-      }),
-    });
-  const inline = review.findings.filter((f) => f.path && f.line);
-  try {
-    await post(
-      inline,
-      review.findings.filter((f) => !inline.includes(f)),
-    );
-  } catch {
-    // A line outside the diff makes GitHub reject the whole review; keep every finding in the body instead.
-    await post([], review.findings).catch((e) =>
-      log(`${repo.name} PR #${pr}: could not post the factory review: ${e}`),
-    );
-  }
+  const findings = await postFindings(
+    repo,
+    token,
+    pr,
+    `**Factory review** (fresh session, \`code-review\` skill)\n\n${review.summary}`,
+    review.findings,
+  ).catch((e) => {
+    log(`${repo.name} PR #${pr}: could not post the factory review: ${e}`);
+    return review.findings;
+  });
   addFollowUps(
     repo,
     token,
     pr,
-    review.findings.filter((f) => f.kind === "follow-up"),
+    findings.filter((f) => f.kind === "follow-up"),
   );
   flagDecisions(
     repo,
     token,
     pr,
-    review.findings.filter((f) => f.kind === "one-way-door"),
+    findings.filter((f) => f.kind === "one-way-door"),
   );
   // What the reviewer already fixed, or deferred to a ticket, needs no one's attention: resolve those threads.
   await settleFindings(
     repo,
     token,
     pr,
-    review.findings.filter((f) => f.kind === "fixed" || f.kind === "follow-up"),
+    findings.filter((f) => f.kind === "fixed" || f.kind === "follow-up"),
   );
 }
 

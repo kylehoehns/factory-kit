@@ -81,9 +81,16 @@ export async function graphql<T>(token: string, query: string, variables: Record
   return result.data;
 }
 
-export type Thread = { id: string; isResolved: boolean; path: string; line: number | null; body: string };
+export type Thread = {
+  id: string;
+  isResolved: boolean;
+  path: string;
+  line: number | null;
+  body: string;
+  first: string;
+};
 
-/** The PR's review threads, with the first comment of each. */
+/** The PR's review threads, with the first comment of each (its body, and its node ID as `first`). */
 export async function reviewThreads(repo: Repo, token: string, pr: number): Promise<Thread[]> {
   const [owner, name] = repo.slug.split("/");
   const data = await graphql<{
@@ -95,7 +102,7 @@ export async function reviewThreads(repo: Repo, token: string, pr: number): Prom
             isResolved: boolean;
             path: string;
             line: number | null;
-            comments: { nodes: { body: string }[] };
+            comments: { nodes: { id: string; body: string }[] };
           }[];
         };
       };
@@ -104,10 +111,14 @@ export async function reviewThreads(repo: Repo, token: string, pr: number): Prom
     token,
     `query($owner: String!, $name: String!, $pr: Int!) {
     repository(owner: $owner, name: $name) { pullRequest(number: $pr) { reviewThreads(first: 100) { nodes {
-      id isResolved path line comments(first: 1) { nodes { body } } } } } } }`,
+      id isResolved path line comments(first: 1) { nodes { id body } } } } } } }`,
     { owner, name, pr },
   );
-  return data.repository.pullRequest.reviewThreads.nodes.map((t) => ({ ...t, body: t.comments.nodes[0]?.body ?? "" }));
+  return data.repository.pullRequest.reviewThreads.nodes.map((t) => ({
+    ...t,
+    body: t.comments.nodes[0]?.body ?? "",
+    first: t.comments.nodes[0]?.id ?? "",
+  }));
 }
 
 /** Reply on a review thread and, unless `keepOpen`, resolve it. */

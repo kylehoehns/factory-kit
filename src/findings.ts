@@ -6,7 +6,17 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { comment, gh, labels, push, requestSecondOpinion, reviewThreads, settleThread } from "./github.ts";
+import {
+  api,
+  comment,
+  gh,
+  labels,
+  noMentions,
+  push,
+  requestSecondOpinion,
+  reviewThreads,
+  settleThread,
+} from "./github.ts";
 import { runSessions } from "./sandbox.ts";
 import { kit, type Repo, RUNS, run } from "./shared.ts";
 import { log, note } from "./status.ts";
@@ -17,42 +27,72 @@ export type Finding = {
   path?: string;
   line?: number;
   body: string;
+  /** The review thread the factory posted for this finding, when GitHub placed it on its line. */
+  thread?: string;
 };
 
 export const MAX_FOLLOW_UPS = 3;
-export type Resolution = { title: string; status: "fixed" | "declined"; note: string };
+export type Resolution = { id: number; status: "fixed" | "declined"; note: string };
 
 const DECLINED_ALL =
   "**Decision for the maintainer:** the factory declined every blocker from the second opinion and changed nothing; " +
   "its reasons are on each thread. Merge if you agree with the factory, or say what to change.";
 const FOLLOW_UP_REPLY = "Tracked as a follow-up: it's filed as a `needs-triage` ticket when this PR merges.";
 
+const followUpReply = (f: Finding) => (f.kind === "follow-up" ? FOLLOW_UP_REPLY : undefined);
+
 /**
- * Reply to and resolve the review threads for these findings, matched by the bold title both reviewers put in
- * each inline comment. One-way doors stay open: they're the maintainer's call.
+ * Post findings from the app: a review holding the heading and any finding GitHub won't place on a line, then each
+ * placed finding as its own comment on its line. Returns the findings with the ID of the thread each one opened, found
+ * by the comment's ID, so the factory answers each thread by ID later.
  */
-export async function settleFindings(
+export async function postFindings(
   repo: Repo,
   token: string,
   pr: number,
+  heading: string,
   findings: Finding[],
-  replies: Map<string, string> = new Map(),
+  signature = "",
+): Promise<Finding[]> {
+  if (findings.length === 0) return [];
+  const text = (f: Finding) => `[${f.kind}] **${f.title}**: ${f.body}${signature}`;
+  const commit = gh(repo, token, "pr", "view", String(pr), "--json", "headRefOid", "--jq", ".headRefOid");
+  const comments = new Map<Finding, string>();
+  for (const f of findings.filter((f) => f.path && f.line)) {
+    const posted = await api<{ node_id: string }>(repo, token, `/pulls/${pr}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body: noMentions(text(f)), commit_id: commit, path: f.path, line: f.line, side: "RIGHT" }),
+    }).catch(() => undefined); // a line outside the diff: the finding goes in the review body
+    if (posted) comments.set(f, posted.node_id);
+  }
+  const threads = comments.size ? await reviewThreads(repo, token, pr) : [];
+  const thread = (f: Finding) => threads.find((t) => t.first === comments.get(f))?.id;
+  const inBody = findings
+    .filter((f) => !comments.has(f))
+    .map((f) => `- [${f.kind}] **${f.title}**${where(f)}: ${f.body}`);
+  await api(repo, token, `/pulls/${pr}/reviews`, {
+    method: "POST",
+    body: JSON.stringify({ event: "COMMENT", body: noMentions([heading, ...inBody].join("\n\n")) }),
+  });
+  return findings.map((f) => ({ ...f, thread: thread(f) }));
+}
+
+/** Reply to and resolve the threads the factory posted for these findings. One-way doors stay open: they're the
+ *  maintainer's call. */
+export async function settleFindings<F extends Finding>(
+  repo: Repo,
+  token: string,
+  pr: number,
+  findings: F[],
+  reply: (f: F) => string | undefined = followUpReply,
   keepOpen = false,
 ) {
-  const threads = (await reviewThreads(repo, token, pr)).filter((t) => !t.isResolved);
   for (const finding of findings) {
-    const thread = threadFor(threads, finding.title);
-    if (!thread || finding.kind === "one-way-door") continue;
-    const reply = replies.get(finding.title) ?? (finding.kind === "follow-up" ? FOLLOW_UP_REPLY : undefined);
-    await settleThread(token, thread.id, reply, keepOpen).catch((e) =>
+    if (!finding.thread || finding.kind === "one-way-door") continue;
+    await settleThread(token, finding.thread, reply(finding), keepOpen).catch((e) =>
       log(`${repo.name} PR #${pr}: could not settle "${finding.title}": ${e}`),
     );
   }
-}
-/** The thread whose bold title matches. Reviewers may put code in backticks in the comment but not in the stored title. */
-export function threadFor<T extends { body: string }>(threads: T[], title: string): T | undefined {
-  const plain = (s: string) => s.replaceAll("`", "");
-  return threads.find((t) => plain(t.body).includes(`**${plain(title)}**`));
 }
 const STORE = /\n*<!-- factory-follow-ups\n([\s\S]*?)\n-->\n?/;
 const SECTION = /\n*### Follow-ups \(filed as tickets when this PR merges\)\n[\s\S]*?(?=\n<!-- factory-follow-ups|$)/;
@@ -130,25 +170,35 @@ export async function triageSecondOpinion(
   );
   if (!opinion || rounds.some((r) => r.source === opinion.id)) return;
 
+  // The second opinion only comments; the factory posts its findings as threads, so it holds every thread's ID.
+  const findings = await postFindings(
+    repo,
+    token,
+    pr,
+    "**Second opinion**: its findings, one thread each so the factory can answer them. The full opinion is in its comment.",
+    opinion.findings,
+    "\n\n_From the second opinion._",
+  );
   const dropped = addFollowUps(
     repo,
     token,
     pr,
-    opinion.findings.filter((f) => f.kind === "follow-up"),
+    findings.filter((f) => f.kind === "follow-up"),
   );
   flagDecisions(
     repo,
     token,
     pr,
-    opinion.findings.filter((f) => f.kind === "one-way-door"),
+    findings.filter((f) => f.kind === "one-way-door"),
   );
   await settleFindings(
     repo,
     token,
     pr,
-    opinion.findings.filter((f) => f.kind === "follow-up"),
+    findings.filter((f) => f.kind === "follow-up"),
   );
-  const blockers = opinion.findings.filter((f) => f.kind === "blocker");
+  // Numbered for the fixer, which answers each by its id.
+  const blockers = findings.filter((f) => f.kind === "blocker").map((f, i) => ({ ...f, id: i + 1 }));
   const marker = `<!-- factory-review-round source=${opinion.id} blockers=${blockers.length} -->`;
   const note = dropped ? ` (${dropped} follow-up(s) over the cap of ${MAX_FOLLOW_UPS} were not recorded)` : "";
   if (blockers.length === 0) {
@@ -170,7 +220,14 @@ export async function triageSecondOpinion(
   );
   await prepareTask();
   const findingsFile = join(repo.root, RUNS, "findings.json");
-  writeFileSync(findingsFile, JSON.stringify(blockers, null, 2));
+  writeFileSync(
+    findingsFile,
+    JSON.stringify(
+      blockers.map(({ thread: _, ...f }) => f),
+      null,
+      2,
+    ),
+  );
   run(repo, "git", ["fetch", "--quiet", "origin", "main", branch]);
   run(repo, "git", ["branch", "--force", branch, `origin/${branch}`]);
   const { outcome, read } = await runSessions(
@@ -186,12 +243,12 @@ export async function triageSecondOpinion(
   const commits = run(repo, "git", ["rev-list", `origin/${branch}..${branch}`]);
   comment(repo, fresh, pr, `Review round ${round} of ${kit().rounds.review}: ${outcome.summary}${note}\n\n${marker}`);
   const resolutions = JSON.parse(read("resolutions.json") ?? "[]") as Resolution[];
-  const declined = (b: Finding) => resolutions.some((r) => r.title === b.title && r.status === "declined");
+  const resolution = (b: { id: number }) => resolutions.find((r) => r.id === b.id);
+  const declined = (b: { id: number }) => resolution(b)?.status === "declined";
   if (outcome.outcome === "success" && !commits && blockers.every(declined)) {
     // Two reviewers disagree and nothing changed: that's a decision for the maintainer, not a failure. Answer each
     // thread with the fixer's reason and leave it open for the maintainer to settle.
-    const reasons = new Map(resolutions.map((r) => [r.title, `**Not changed:** ${r.note}`]));
-    await settleFindings(repo, fresh, pr, blockers, reasons, true);
+    await settleFindings(repo, fresh, pr, blockers, (b) => `**Not changed:** ${resolution(b)?.note}`, true);
     labels(repo, fresh, pr, { add: ["decision-needed"] });
     comment(repo, fresh, pr, DECLINED_ALL);
     log(`${repo.name} PR #${pr}: the factory declined every second-opinion blocker; waiting for the maintainer`);
@@ -204,19 +261,12 @@ export async function triageSecondOpinion(
   push(repo, fresh, branch); // fast-forward only
   // Answer each blocker's thread with what was done about it, then resolve it.
   const head = run(repo, "git", ["rev-parse", "--short", branch]);
-  const replies = new Map(
-    resolutions.map((r) => [
-      r.title,
-      r.status === "fixed" ? `**Fixed in \`${head}\`:** ${r.note}` : `**Not changed:** ${r.note}`,
-    ]),
-  );
-  await settleFindings(
-    repo,
-    fresh,
-    pr,
-    blockers.filter((b) => replies.has(b.title)),
-    replies,
-  );
+  const reply = (r: Resolution) =>
+    r.status === "fixed" ? `**Fixed in \`${head}\`:** ${r.note}` : `**Not changed:** ${r.note}`;
+  for (const b of blockers) {
+    const r = resolution(b);
+    if (r) await settleFindings(repo, fresh, pr, [b], () => reply(r));
+  }
   // Ask for a fresh second opinion on the fixed code.
   requestSecondOpinion(repo, fresh, pr);
   log(`${repo.name} PR #${pr}: pushed review fix round ${round}`);
