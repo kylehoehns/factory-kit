@@ -48,4 +48,4 @@ npm run factory                        # keeps watching; add -- --once for a sin
 
 ## Working on the kit
 
-`npm run typecheck && npm test`. Node runs the TypeScript directly, so there's no build step. The factory doesn't work on this repo: changes are made by hand and merged by the maintainer. A repo picks up a change when the `v1` tag moves.
+`npm run check` lints and checks formatting ([Biome](https://biomejs.dev)), type-checks and runs the tests; CI runs the same. `npm run format` fixes formatting and safe lint findings. Node runs the TypeScript directly, so there's no build step. The factory doesn't work on this repo: changes are made by hand and merged by the maintainer. A repo picks up a change when the `v1` tag moves.

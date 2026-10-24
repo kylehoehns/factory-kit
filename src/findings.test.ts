@@ -7,7 +7,10 @@ const f = (title: string): Finding => ({ kind: "follow-up", title, path: "app/X.
 test("follow-ups survive a round trip through the PR body", () => {
   const body = withFollowUps("## Summary\n\nDid things.\n\nCloses #3\n", [f("Widen column"), f("Rate limit")]);
   assert.match(body, /### Follow-ups \(filed as tickets when this PR merges\)/);
-  assert.deepEqual(followUpsIn(body).map((x) => x.title), ["Widen column", "Rate limit"]);
+  assert.deepEqual(
+    followUpsIn(body).map((x) => x.title),
+    ["Widen column", "Rate limit"],
+  );
   assert.match(body, /Closes #3/);
 });
 
@@ -16,7 +19,10 @@ test("rewriting the list replaces it instead of appending a second one", () => {
   const twice = withFollowUps(once, [f("A"), f("B")]);
   assert.equal(twice.match(/### Follow-ups/g)?.length, 1);
   assert.equal(twice.match(/factory-follow-ups\n/g)?.length, 1);
-  assert.deepEqual(followUpsIn(twice).map((x) => x.title), ["A", "B"]);
+  assert.deepEqual(
+    followUpsIn(twice).map((x) => x.title),
+    ["A", "B"],
+  );
 });
 
 test("an empty list removes the section", () => {
@@ -24,8 +30,15 @@ test("an empty list removes the section", () => {
 });
 
 test("the latest second opinion's findings block is read", () => {
-  const opinion = (n: string, json: string) => ({ id: n, body: `Second opinion (security)\n\nStuff.\n\n\`\`\`findings\n${json}\n\`\`\`` });
-  const read = secondOpinion([opinion("old", "[]"), { id: "x", body: "unrelated" }, opinion("new", '[{"kind":"blocker","title":"T","body":"B"}]')]);
+  const opinion = (n: string, json: string) => ({
+    id: n,
+    body: `Second opinion (security)\n\nStuff.\n\n\`\`\`findings\n${json}\n\`\`\``,
+  });
+  const read = secondOpinion([
+    opinion("old", "[]"),
+    { id: "x", body: "unrelated" },
+    opinion("new", '[{"kind":"blocker","title":"T","body":"B"}]'),
+  ]);
   assert.equal(read?.id, "new");
   assert.equal(read?.findings[0].kind, "blocker");
 });

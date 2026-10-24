@@ -4,9 +4,20 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { appToken, ciResult, failedLog, type FactoryPr, gh, openFactoryPrs, push, requestSecondOpinion, roundMarker, roundsTried } from "./github.ts";
+import {
+  appToken,
+  ciResult,
+  comment,
+  type FactoryPr,
+  failedLog,
+  openFactoryPrs,
+  push,
+  requestSecondOpinion,
+  roundMarker,
+  roundsTried,
+} from "./github.ts";
 import { pruneWorktrees, runSessions, type Session } from "./sandbox.ts";
-import { BRANCH_PREFIX, forbiddenChanges, kit, type Repo, run, RUNS } from "./shared.ts";
+import { BRANCH_PREFIX, forbiddenChanges, kit, type Repo, RUNS, run } from "./shared.ts";
 
 export type Hooks = {
   writeTask: (issue: number, token: string) => Promise<void>;
@@ -36,14 +47,17 @@ async function fixRound(repo: Repo, pr: FactoryPr, round: Round, claudeToken: st
   const forbidden = forbiddenChanges(repo, branch);
   const label = `${round.name}, round ${n} of ${round.max}`;
   if (outcome.outcome !== "success" || !commits || forbidden.length) {
-    const why = forbidden.length ? `the session touched the factory's own controls: ${forbidden.join(", ")}`
-      : !commits ? `the session made no commits (${outcome.summary})` : outcome.summary;
-    gh(repo, fresh, "pr", "comment", String(pr.number), "--body", `${label}: ${why}\n\n${roundMarker(round.kind, pr.headRefOid)}`);
+    const why = forbidden.length
+      ? `the session touched the factory's own controls: ${forbidden.join(", ")}`
+      : !commits
+        ? `the session made no commits (${outcome.summary})`
+        : outcome.summary;
+    comment(repo, fresh, pr.number, `${label}: ${why}\n\n${roundMarker(round.kind, pr.headRefOid)}`);
     hooks.block(fresh, pr.number, why);
     return;
   }
   push(repo, fresh, branch); // fast-forward only
-  gh(repo, fresh, "pr", "comment", String(pr.number), "--body", `${label}: ${outcome.summary}\n\n${roundMarker(round.kind, pr.headRefOid)}`);
+  comment(repo, fresh, pr.number, `${label}: ${outcome.summary}\n\n${roundMarker(round.kind, pr.headRefOid)}`);
   requestSecondOpinion(repo, fresh, pr.number); // the new commits haven't been read by anyone independent
   console.log(`${repo.name} PR #${pr.number}: pushed ${label}`);
 }
@@ -55,17 +69,43 @@ export async function fixPrs(repo: Repo, claudeToken: string, hooks: Hooks) {
   for (const pr of openFactoryPrs(repo, token, BRANCH_PREFIX)) {
     if (pr.labels.some((l) => l.name === "agent:blocked")) continue;
     if (pr.mergeable === "CONFLICTING") {
-      await fixRound(repo, pr, { kind: "update", name: "Updating with main", max: kit().rounds.update, inputs: [task],
-        session: { role: "updateBranch", prompt: "update-branch.md" } }, claudeToken, hooks, token);
+      await fixRound(
+        repo,
+        pr,
+        {
+          kind: "update",
+          name: "Updating with main",
+          max: kit().rounds.update,
+          inputs: [task],
+          session: { role: "updateBranch", prompt: "update-branch.md" },
+        },
+        claudeToken,
+        hooks,
+        token,
+      );
       continue; // CI on a conflicting branch says nothing useful; look again after the update
     }
     const ci = await ciResult(repo, token, pr.headRefOid);
     if (!ci?.failed) continue;
     if (roundsTried(repo, token, pr.number, "ci").includes(pr.headRefOid)) continue;
     writeFileSync(ciLog, failedLog(repo, ci.runId));
-    await fixRound(repo, pr, { kind: "ci", name: "CI fix", max: kit().rounds.ci, inputs: [task, ciLog],
-      session: { role: "fixCi", prompt: "fix-ci.md" } }, claudeToken,
-      { ...hooks, block: (t, target, reason) => hooks.block(t, target, `${reason} Latest failure: https://github.com/${repo.slug}/actions/runs/${ci.runId}`) },
-      token);
+    await fixRound(
+      repo,
+      pr,
+      {
+        kind: "ci",
+        name: "CI fix",
+        max: kit().rounds.ci,
+        inputs: [task, ciLog],
+        session: { role: "fixCi", prompt: "fix-ci.md" },
+      },
+      claudeToken,
+      {
+        ...hooks,
+        block: (t, target, reason) =>
+          hooks.block(t, target, `${reason} Latest failure: https://github.com/${repo.slug}/actions/runs/${ci.runId}`),
+      },
+      token,
+    );
   }
 }

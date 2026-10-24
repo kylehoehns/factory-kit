@@ -12,6 +12,20 @@ const gid = exec(".", "id", ["-g"]);
 for (const { slug, path } of kit().repos) {
   const repo = openRepo(slug, path);
   console.log(`${slug}: building ${imageName(repo)}`);
-  execFileSync("docker", ["build", "-t", imageName(repo), "--build-arg", `AGENT_UID=${uid}`, "--build-arg", `AGENT_GID=${gid}`,
-    "-f", join(repo.root, ".factory/Dockerfile"), join(repo.root, ".factory")], { stdio: "inherit" });
+  execFileSync(
+    "docker",
+    [
+      "build",
+      "-t",
+      imageName(repo),
+      "--build-arg",
+      `AGENT_UID=${uid}`,
+      "--build-arg",
+      `AGENT_GID=${gid}`,
+      "-f",
+      join(repo.root, ".factory/Dockerfile"),
+      join(repo.root, ".factory"),
+    ],
+    { stdio: "inherit" },
+  );
 }

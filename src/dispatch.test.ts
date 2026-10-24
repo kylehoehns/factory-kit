@@ -5,7 +5,13 @@ import { pick, type Ticket } from "./dispatch.ts";
 const MAINTAINERS = ["kylehoehns"];
 
 const ticket = (number: number, labels: string[] = [], o: Partial<Ticket> = {}): Ticket => ({
-  number, labels: ["ready-for-agent", ...labels], openBlockers: 0, subIssues: 0, labelledBy: "kylehoehns", hasOpenPr: false, ...o,
+  number,
+  labels: ["ready-for-agent", ...labels],
+  openBlockers: 0,
+  subIssues: 0,
+  labelledBy: "kylehoehns",
+  hasOpenPr: false,
+  ...o,
 });
 const chosen = (tickets: Ticket[], wip = 0, limit = 1) => pick(tickets, wip, limit, MAINTAINERS)?.number;
 
@@ -26,7 +32,10 @@ test("claimed and blocked tickets are skipped", () => {
 });
 
 test("only a maintainer's label counts", () => {
-  assert.equal(chosen([ticket(3, [], { labelledBy: "drive-by" }), ticket(4, [], { labelledBy: undefined })]), undefined);
+  assert.equal(
+    chosen([ticket(3, [], { labelledBy: "drive-by" }), ticket(4, [], { labelledBy: undefined })]),
+    undefined,
+  );
 });
 
 test("a ticket whose PR is waiting for review is not built again", () => {

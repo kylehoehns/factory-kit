@@ -27,6 +27,18 @@ export function gh(repo: Repo, token: string, ...args: string[]): string {
   return run(repo, "gh", [...safe, "--repo", repo.slug], { GH_TOKEN: token });
 }
 
+/** A comment on an issue or PR (they share numbers). */
+export function comment(repo: Repo, token: string, target: number, body: string) {
+  comment(repo, token, target, body);
+}
+
+/** Adds and removes labels on an issue or PR, in one call. */
+export function labels(repo: Repo, token: string, target: number, change: { add?: string[]; remove?: string[] }) {
+  const add = (change.add ?? []).flatMap((label) => ["--add-label", label]);
+  const remove = (change.remove ?? []).flatMap((label) => ["--remove-label", label]);
+  gh(repo, token, "issue", "edit", String(target), ...add, ...remove);
+}
+
 /** Backticks `@word` outside code, so an agent writing `@Test` doesn't notify a GitHub user named "test". */
 export function noMentions(body: string): string {
   return body
@@ -36,14 +48,24 @@ export function noMentions(body: string): string {
 }
 
 /** A REST call on the repo. `optional` turns a 404 into undefined instead of an error. */
-export async function api<T>(repo: Repo, token: string, path: string, init: RequestInit & { optional?: boolean } = {}): Promise<T> {
+export async function api<T>(
+  repo: Repo,
+  token: string,
+  path: string,
+  init: RequestInit & { optional?: boolean } = {},
+): Promise<T> {
   const url = path.startsWith("https://") ? path : `https://api.github.com/repos/${repo.slug}${path}`;
   const response = await fetch(url, {
     ...init,
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
   });
   if (init.optional && response.status === 404) return undefined as T;
-  if (!response.ok) throw new Error(`GitHub ${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`);
+  if (!response.ok)
+    throw new Error(`GitHub ${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`);
   const text = await response.text();
   return (text ? JSON.parse(text) : undefined) as T;
 }
@@ -64,61 +86,101 @@ export type Thread = { id: string; isResolved: boolean; path: string; line: numb
 /** The PR's review threads, with the first comment of each. */
 export async function reviewThreads(repo: Repo, token: string, pr: number): Promise<Thread[]> {
   const [owner, name] = repo.slug.split("/");
-  const data = await graphql<{ repository: { pullRequest: { reviewThreads: { nodes: {
-    id: string; isResolved: boolean; path: string; line: number | null; comments: { nodes: { body: string }[] };
-  }[] } } } }>(token, `query($owner: String!, $name: String!, $pr: Int!) {
+  const data = await graphql<{
+    repository: {
+      pullRequest: {
+        reviewThreads: {
+          nodes: {
+            id: string;
+            isResolved: boolean;
+            path: string;
+            line: number | null;
+            comments: { nodes: { body: string }[] };
+          }[];
+        };
+      };
+    };
+  }>(
+    token,
+    `query($owner: String!, $name: String!, $pr: Int!) {
     repository(owner: $owner, name: $name) { pullRequest(number: $pr) { reviewThreads(first: 100) { nodes {
-      id isResolved path line comments(first: 1) { nodes { body } } } } } } }`, { owner, name, pr });
+      id isResolved path line comments(first: 1) { nodes { body } } } } } } }`,
+    { owner, name, pr },
+  );
   return data.repository.pullRequest.reviewThreads.nodes.map((t) => ({ ...t, body: t.comments.nodes[0]?.body ?? "" }));
 }
 
 /** Reply on a review thread and, unless `keepOpen`, resolve it. */
 export async function settleThread(token: string, threadId: string, reply: string | undefined, keepOpen = false) {
   if (reply) {
-    await graphql(token, `mutation($id: ID!, $body: String!) {
+    await graphql(
+      token,
+      `mutation($id: ID!, $body: String!) {
       addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }`,
-      { id: threadId, body: noMentions(reply) });
+      { id: threadId, body: noMentions(reply) },
+    );
   }
   if (!keepOpen) {
-    await graphql(token, `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`, { id: threadId });
+    await graphql(token, `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`, {
+      id: threadId,
+    });
   }
 }
 
 /** Push a local branch as the app. Fast-forward only unless `force`, so a human's commits are never lost. */
 export function push(repo: Repo, token: string, branch: string, force = false) {
   const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
-  run(repo, "git", ["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`, "push",
-    ...(force ? ["--force"] : []), `https://github.com/${repo.slug}.git`, `${branch}:${branch}`]);
+  run(repo, "git", [
+    "-c",
+    `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`,
+    "push",
+    ...(force ? ["--force"] : []),
+    `https://github.com/${repo.slug}.git`,
+    `${branch}:${branch}`,
+  ]);
 }
 
 /** Ask for the second opinion on the PR's current head commit: adding the label starts the repo's second-review
  *  workflow, whose pass counts toward the low tier. */
 export function requestSecondOpinion(repo: Repo, token: string, pr: number) {
   try {
-    gh(repo, token, "pr", "edit", String(pr), "--remove-label", "claude-review");
+    labels(repo, token, pr, { remove: ["claude-review"] });
   } catch {
     // not labelled yet
   }
-  gh(repo, token, "pr", "edit", String(pr), "--add-label", "claude-review");
+  labels(repo, token, pr, { add: ["claude-review"] });
 }
 
 // --- CI on factory PRs ---
 
 export type FactoryPr = {
-  number: number; headRefName: string; headRefOid: string; labels: { name: string }[]; mergeable: string;
+  number: number;
+  headRefName: string;
+  headRefOid: string;
+  labels: { name: string }[];
+  mergeable: string;
 };
 
 export function openFactoryPrs(repo: Repo, token: string, prefix: string): FactoryPr[] {
-  const prs = JSON.parse(gh(repo, token, "pr", "list", "--state", "open", "--json", "number,headRefName,headRefOid,labels,mergeable")) as FactoryPr[];
+  const prs = JSON.parse(
+    gh(repo, token, "pr", "list", "--state", "open", "--json", "number,headRefName,headRefOid,labels,mergeable"),
+  ) as FactoryPr[];
   return prs.filter((pr) => pr.headRefName.startsWith(prefix));
 }
 
 /** The `ci` check on a commit: undefined while it hasn't finished. */
-export async function ciResult(repo: Repo, token: string, sha: string): Promise<{ failed: boolean; runId: string } | undefined> {
+export async function ciResult(
+  repo: Repo,
+  token: string,
+  sha: string,
+): Promise<{ failed: boolean; runId: string } | undefined> {
   const { check_runs } = await api<{ check_runs: { status: string; conclusion: string; details_url: string }[] }>(
-    repo, token, `/commits/${sha}/check-runs?check_name=ci`);
+    repo,
+    token,
+    `/commits/${sha}/check-runs?check_name=ci`,
+  );
   const check = check_runs[0];
-  if (!check || check.status !== "completed") return undefined;
+  if (check?.status !== "completed") return undefined;
   const runId = check.details_url.match(/runs\/(\d+)/)?.[1] ?? "";
   return { failed: check.conclusion === "failure", runId };
 }
@@ -134,7 +196,9 @@ export function failedLog(repo: Repo, runId: string): string {
 /** Commits the factory has already run a fix round of this kind on, from markers in its own PR comments. */
 export function roundsTried(repo: Repo, token: string, pr: number, kind: "ci" | "update"): string[] {
   const marker = new RegExp(`<!-- factory-${kind}-round sha=([0-9a-f]+) -->`, "g");
-  const bodies = JSON.parse(gh(repo, token, "pr", "view", String(pr), "--json", "comments")).comments as { body: string }[];
+  const bodies = JSON.parse(gh(repo, token, "pr", "view", String(pr), "--json", "comments")).comments as {
+    body: string;
+  }[];
   return bodies.flatMap((c) => [...c.body.matchAll(marker)].map((m) => m[1]));
 }
 

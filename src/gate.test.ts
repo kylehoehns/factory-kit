@@ -38,15 +38,31 @@ test("the identity module is high", () => {
 
 test("migrations and the factory's own controls are high", () => {
   for (const path of [
-    "app/src/main/resources/db/migration/V2__rsvps.sql", ".github/workflows/ci.yml", ".factory/config.yml",
-    ".claude/hooks/guard-paths.sh", ".githooks/pre-commit", "scripts/check_file_tokens.py", ".agents/skills/tdd/SKILL.md",
-    "app/build.gradle.kts", "gradle/libs.versions.toml",
-  ]) assert.equal(tier([modified(path, 1)]), "high", path);
+    "app/src/main/resources/db/migration/V2__rsvps.sql",
+    ".github/workflows/ci.yml",
+    ".factory/config.yml",
+    ".claude/hooks/guard-paths.sh",
+    ".githooks/pre-commit",
+    "scripts/check_file_tokens.py",
+    ".agents/skills/tdd/SKILL.md",
+    "app/build.gradle.kts",
+    "gradle/libs.versions.toml",
+  ])
+    assert.equal(tier([modified(path, 1)]), "high", path);
 });
 
 test("moving a file out of a high-risk path is still high", () => {
-  assert.equal(tier([{ path: "app/src/main/java/dev/rsvpfactory/groups/SignIn.java", status: "renamed", changes: 0,
-    previousPath: "app/src/main/java/dev/rsvpfactory/identity/SignIn.java" }]), "high");
+  assert.equal(
+    tier([
+      {
+        path: "app/src/main/java/dev/rsvpfactory/groups/SignIn.java",
+        status: "renamed",
+        changes: 0,
+        previousPath: "app/src/main/java/dev/rsvpfactory/identity/SignIn.java",
+      },
+    ]),
+    "high",
+  );
 });
 
 test("adding acceptance scenarios is ordinary work", () => {
@@ -55,8 +71,13 @@ test("adding acceptance scenarios is ordinary work", () => {
 });
 
 test("a PR that only adds tests is low at any size", () => {
-  assert.equal(tier([added("acceptance/src/test/java/dev/rsvpfactory/acceptance/RsvpLimitScenarios.java", 400),
-    modified("app/src/test/java/dev/rsvpfactory/rsvp/RsvpApiTests.java", 9)]), "low");
+  assert.equal(
+    tier([
+      added("acceptance/src/test/java/dev/rsvpfactory/acceptance/RsvpLimitScenarios.java", 400),
+      modified("app/src/test/java/dev/rsvpfactory/rsvp/RsvpApiTests.java", 9),
+    ]),
+    "low",
+  );
 });
 
 test("editing or deleting a test line is not only adding tests", () => {
@@ -66,14 +87,24 @@ test("editing or deleting a test line is not only adding tests", () => {
 });
 
 test("tests with production code are not only tests", () => {
-  assert.equal(tier([added("app/src/test/java/dev/rsvpfactory/rsvp/RsvpApiTests.java"),
-    modified("app/src/main/java/dev/rsvpfactory/rsvp/RsvpService.java", 1)]), "medium");
+  assert.equal(
+    tier([
+      added("app/src/test/java/dev/rsvpfactory/rsvp/RsvpApiTests.java"),
+      modified("app/src/main/java/dev/rsvpfactory/rsvp/RsvpService.java", 1),
+    ]),
+    "medium",
+  );
 });
 
 test("changing or deleting an existing scenario is flagged", () => {
   for (const status of ["modified", "removed"]) {
-    const decision = decide([{ path: "acceptance/src/test/java/dev/rsvpfactory/acceptance/RsvpScenarios.java", status, changes: 3 }]);
-    assert.ok(decision.reasons.some((r) => r.includes("already exists in acceptance/*")), status);
+    const decision = decide([
+      { path: "acceptance/src/test/java/dev/rsvpfactory/acceptance/RsvpScenarios.java", status, changes: 3 },
+    ]);
+    assert.ok(
+      decision.reasons.some((r) => r.includes("already exists in acceptance/*")),
+      status,
+    );
   }
 });
 
@@ -94,7 +125,12 @@ test("a reviewed feature with too much production code is medium", () => {
 
 test("a review never lowers a floor", () => {
   assert.equal(tier([added("app/src/main/resources/db/migration/V7__rsvp.sql", 5)], { reviewed: true }), "high");
-  const scenario = { path: "acceptance/src/test/java/dev/rsvpfactory/acceptance/RsvpScenarios.java", status: "modified", changes: 3, deletions: 1 };
+  const scenario = {
+    path: "acceptance/src/test/java/dev/rsvpfactory/acceptance/RsvpScenarios.java",
+    status: "modified",
+    changes: 3,
+    deletions: 1,
+  };
   assert.equal(tier([scenario], { reviewed: true }), "medium");
   const code = added("app/src/main/java/dev/rsvpfactory/rsvp/A.java");
   assert.equal(tier([code], { reviewed: true, trusted: false }), "medium");
@@ -110,7 +146,10 @@ test("a one-way door is never low", () => {
 });
 
 test("a tier never goes down", () => {
-  assert.equal(tier([modified(".github/workflows/ci.yml"), modified("README.md")], { body: "**Door:** two-way" }), "high");
+  assert.equal(
+    tier([modified(".github/workflows/ci.yml"), modified("README.md")], { body: "**Door:** two-way" }),
+    "high",
+  );
 });
 
 test("globs behave like Python's fnmatch", () => {

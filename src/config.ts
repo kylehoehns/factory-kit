@@ -46,43 +46,62 @@ export type KitConfig = {
   repos: { slug: string; path: string }[];
 };
 
-const strings = (value: unknown, where: string): string[] => {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) throw new Error(`${where} must be a list of strings`);
-  return value as string[];
+type RawRepoConfig = {
+  check?: string;
+  autoMerge?: string;
+  maintainers?: unknown;
+  factoryBot?: string;
+  protected?: unknown;
+  sandbox?: { docker?: unknown; caches?: { name: string; path: string }[] };
+  risk?: {
+    low?: Partial<Record<keyof RiskPolicy["low"], unknown>>;
+    medium?: { existingPaths?: unknown };
+    high?: { paths?: unknown };
+  };
 };
 
-function required<T>(value: T | undefined, where: string): T {
-  if (value === undefined || value === null) throw new Error(`.factory/config.yml: ${where} is required`);
-  return value;
+const fail = (message: string): never => {
+  throw new Error(`.factory/config.yml: ${message}`);
+};
+
+const required = <T>(value: T | undefined, where: string): T => value ?? fail(`${where} is required`);
+
+function strings(value: unknown, where: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) fail(`${where} must be a list of strings`);
+  return value as string[];
 }
 
+function number(value: unknown, fallback: number, where: string): number {
+  if (value === undefined) return fallback;
+  return typeof value === "number" ? value : fail(`${where} must be a number`);
+}
+
+const STAGES = ["off", "shadow", "on"] as const;
+
 export function parseRepoConfig(text: string): RepoConfig {
-  const raw = (parse(text) ?? {}) as any;
-  const risk = raw.risk ?? {};
-  const autoMerge = raw.autoMerge ?? "off";
-  if (!["off", "shadow", "on"].includes(autoMerge)) throw new Error(".factory/config.yml: autoMerge must be off, shadow or on");
+  const raw = (parse(text) ?? {}) as RawRepoConfig;
+  const { low = {}, medium = {}, high = {} } = raw.risk ?? {};
+  const stage = raw.autoMerge ?? "off";
+  const autoMerge = STAGES.find((s) => s === stage) ?? fail("autoMerge must be off, shadow or on");
   return {
     check: required(raw.check, "check"),
     autoMerge,
     maintainers: strings(required(raw.maintainers, "maintainers"), "maintainers"),
     factoryBot: required(raw.factoryBot, "factoryBot"),
     protected: strings(raw.protected ?? [".github/", ".factory/"], "protected"),
-    sandbox: {
-      docker: raw.sandbox?.docker === true,
-      caches: (raw.sandbox?.caches ?? []) as { name: string; path: string }[],
-    },
+    sandbox: { docker: raw.sandbox?.docker === true, caches: raw.sandbox?.caches ?? [] },
     risk: {
       low: {
-        paths: strings(risk.low?.paths, "risk.low.paths"),
-        exclude: strings(risk.low?.exclude, "risk.low.exclude"),
-        maxChangedLines: risk.low?.maxChangedLines ?? 100,
-        testPaths: strings(risk.low?.testPaths, "risk.low.testPaths"),
-        reviewedProductionPaths: strings(risk.low?.reviewedProductionPaths, "risk.low.reviewedProductionPaths"),
-        reviewedMaxProductionLines: risk.low?.reviewedMaxProductionLines ?? 0,
+        paths: strings(low.paths, "risk.low.paths"),
+        exclude: strings(low.exclude, "risk.low.exclude"),
+        maxChangedLines: number(low.maxChangedLines, 100, "risk.low.maxChangedLines"),
+        testPaths: strings(low.testPaths, "risk.low.testPaths"),
+        reviewedProductionPaths: strings(low.reviewedProductionPaths, "risk.low.reviewedProductionPaths"),
+        reviewedMaxProductionLines: number(low.reviewedMaxProductionLines, 0, "risk.low.reviewedMaxProductionLines"),
       },
-      medium: { existingPaths: strings(risk.medium?.existingPaths, "risk.medium.existingPaths") },
-      high: { paths: strings(risk.high?.paths, "risk.high.paths") },
+      medium: { existingPaths: strings(medium.existingPaths, "risk.medium.existingPaths") },
+      high: { paths: strings(high.paths, "risk.high.paths") },
     },
   };
 }

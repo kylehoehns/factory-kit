@@ -21,8 +21,8 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Type-check and test
-        run: npm ci --silent && npm run typecheck && npm test
+      - name: Lint, format, type-check and test
+        run: npm ci --silent && npm run check
 
       - name: Lint workflows and shell scripts
         run: |

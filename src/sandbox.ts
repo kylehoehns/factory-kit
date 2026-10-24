@@ -2,14 +2,14 @@
 // If the repo asks for it (sandbox.docker), a private Docker-in-Docker on its own network as well, so Testcontainers
 // works inside the sandbox without the agent ever reaching the host's Docker.
 
-import { claudeCode, createSandbox } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { claudeCode, createSandbox } from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { Role } from "./config.ts";
-import { KIT, kit, type Outcome, type Repo, run, RUNS } from "./shared.ts";
+import { KIT, kit, type Outcome, type Repo, RUNS, run } from "./shared.ts";
 
 const DIND_IMAGE = "docker:29.9.2-dind";
 
@@ -39,7 +39,10 @@ function startPrivateDocker(repo: Repo, issue: number): PrivateDocker {
   const network = `factory-${repo.name}-${issue}`;
   const host = `factory-dind-${repo.name}-${issue}`;
   const stop = () => {
-    for (const args of [["rm", "-f", host], ["network", "rm", network]]) {
+    for (const args of [
+      ["rm", "-f", host],
+      ["network", "rm", network],
+    ]) {
       try {
         execFileSync("docker", args, { stdio: "ignore" });
       } catch {
@@ -50,8 +53,19 @@ function startPrivateDocker(repo: Repo, issue: number): PrivateDocker {
   stop();
   run(repo, "docker", ["network", "create", network]);
   // Plain TCP is fine here: the daemon is only reachable on this run's private network.
-  run(repo, "docker", ["run", "-d", "--privileged", "--name", host, "--network", network, "-e", "DOCKER_TLS_CERTDIR=",
-    DIND_IMAGE, "--tls=false"]);
+  run(repo, "docker", [
+    "run",
+    "-d",
+    "--privileged",
+    "--name",
+    host,
+    "--network",
+    network,
+    "-e",
+    "DOCKER_TLS_CERTDIR=",
+    DIND_IMAGE,
+    "--tls=false",
+  ]);
   for (let attempt = 0; ; attempt++) {
     try {
       execFileSync("docker", ["exec", host, "docker", "info"], { stdio: "ignore" });
@@ -79,8 +93,14 @@ export type SessionsResult = { outcome: Outcome; read: (file: string) => string 
  * Runs each session in turn in one sandbox on `branch`, stopping at the first that doesn't succeed.
  * `inputs` are host files copied into the worktree's .factory/runs/ for the agents to read.
  */
-export async function runSessions(repo: Repo, issue: number, branch: string, sessions: Session[], inputs: string[],
-  claudeToken: string): Promise<SessionsResult> {
+export async function runSessions(
+  repo: Repo,
+  issue: number,
+  branch: string,
+  sessions: Session[],
+  inputs: string[],
+  claudeToken: string,
+): Promise<SessionsResult> {
   const privateDocker = repo.config.sandbox.docker ? startPrivateDocker(repo, issue) : undefined;
   const mounts = repo.config.sandbox.caches.map((cache) => {
     const hostPath = join(homedir(), ".cache/factory", repo.name, cache.name);
@@ -109,7 +129,9 @@ export async function runSessions(repo: Repo, issue: number, branch: string, ses
           GIT_AUTHOR_EMAIL: botEmail,
           GIT_COMMITTER_NAME: bot,
           GIT_COMMITTER_EMAIL: botEmail,
-          ...(privateDocker ? { DOCKER_HOST: `tcp://${privateDocker.host}:2375`, TESTCONTAINERS_HOST_OVERRIDE: privateDocker.host } : {}),
+          ...(privateDocker
+            ? { DOCKER_HOST: `tcp://${privateDocker.host}:2375`, TESTCONTAINERS_HOST_OVERRIDE: privateDocker.host }
+            : {}),
         },
       }),
     });
@@ -153,10 +175,18 @@ export async function runSessions(repo: Repo, issue: number, branch: string, ses
       const outcome: Outcome = outcomeText
         ? JSON.parse(outcomeText)
         : { outcome: "blocked", summary: `The ${session.role} session ended without writing an outcome.` };
-      appendFileSync(join(repo.root, RUNS, "metrics.jsonl"), JSON.stringify({
-        at: new Date().toISOString(), issue, role: session.role, outcome: outcome.outcome, minutes: (Date.now() - started) / 60_000,
-        commits: result.commits.length, tokens: sessionTokens(result.iterations.map((i) => i.sessionFilePath)),
-      }) + "\n");
+      appendFileSync(
+        join(repo.root, RUNS, "metrics.jsonl"),
+        `${JSON.stringify({
+          at: new Date().toISOString(),
+          issue,
+          role: session.role,
+          outcome: outcome.outcome,
+          minutes: (Date.now() - started) / 60_000,
+          commits: result.commits.length,
+          tokens: sessionTokens(result.iterations.map((i) => i.sessionFilePath)),
+        })}\n`,
+      );
       if (outcome.outcome !== "success") return { outcome, read };
       last = outcome; // keep the agent's own summary: it's what the PR comment for a fix round says
     }
