@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Finding, followUpsIn, secondOpinion, threadFor, withFollowUps } from "./findings.ts";
+import { type Finding, followUpsIn, secondOpinion, settleFindings, withFollowUps } from "./findings.ts";
 
 const f = (title: string): Finding => ({ kind: "follow-up", title, path: "app/X.java", line: 3, body: "why" });
 
@@ -48,12 +48,28 @@ test("a second opinion without a readable findings block is left to the maintain
   assert.equal(secondOpinion([{ id: "2", body: "Second opinion (security)\n```findings\nnot json\n```" }]), undefined);
 });
 
-test("a finding finds its thread even when the thread puts code in backticks", () => {
-  const threads = [
-    { id: "a", body: "[follow-up] **Plan pattern is a loose substring match**\n\nwhy" },
-    { id: "b", body: "[follow-up] **Renamed causes break saved `?cause=` links**\n\nwhy" },
-  ];
-  assert.equal(threadFor(threads, "Renamed causes break saved ?cause= links")?.id, "b");
-  assert.equal(threadFor(threads, "Plan pattern is a loose substring match")?.id, "a");
-  assert.equal(threadFor(threads, "Something else"), undefined);
+test("settling answers each finding's own thread by ID, and leaves one-way doors and unplaced findings alone", async () => {
+  const calls: { query: string; variables: Record<string, string> }[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: { body: string }) => {
+    calls.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ data: {} }));
+  }) as typeof fetch;
+  try {
+    const repo = { name: "r" } as Parameters<typeof settleFindings>[0];
+    await settleFindings(repo, "t", 1, [
+      { ...f("Renamed causes break saved ?cause= links"), thread: "T1" },
+      { ...f("Not on a line") },
+      { ...f("Schema change"), kind: "one-way-door", thread: "T2" },
+    ]);
+  } finally {
+    globalThis.fetch = real;
+  }
+  assert.deepEqual(
+    calls.map((c) => [c.query.includes("resolveReviewThread") ? "resolve" : "reply", c.variables.id]),
+    [
+      ["reply", "T1"],
+      ["resolve", "T1"],
+    ],
+  );
 });
