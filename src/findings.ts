@@ -41,13 +41,18 @@ export async function settleFindings(
 ) {
   const threads = (await reviewThreads(repo, token, pr)).filter((t) => !t.isResolved);
   for (const finding of findings) {
-    const thread = threads.find((t) => t.body.includes(`**${finding.title}**`));
+    const thread = threadFor(threads, finding.title);
     if (!thread || finding.kind === "one-way-door") continue;
     const reply = replies.get(finding.title) ?? (finding.kind === "follow-up" ? FOLLOW_UP_REPLY : undefined);
     await settleThread(token, thread.id, reply, keepOpen).catch((e) =>
       log(`${repo.name} PR #${pr}: could not settle "${finding.title}": ${e}`),
     );
   }
+}
+/** The thread whose bold title matches. Reviewers may put code in backticks in the comment but not in the stored title. */
+export function threadFor<T extends { body: string }>(threads: T[], title: string): T | undefined {
+  const plain = (s: string) => s.replaceAll("`", "");
+  return threads.find((t) => plain(t.body).includes(`**${plain(title)}**`));
 }
 const STORE = /\n*<!-- factory-follow-ups\n([\s\S]*?)\n-->\n?/;
 const SECTION = /\n*### Follow-ups \(filed as tickets when this PR merges\)\n[\s\S]*?(?=\n<!-- factory-follow-ups|$)/;

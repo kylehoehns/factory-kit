@@ -95,13 +95,23 @@ async function qualifies(
   return undefined;
 }
 
+/** The last reason given for each PR waiting, so it is noted when it changes, not every pass. */
+const waiting = new Map<string, string | undefined>();
+
 export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
   const mode = repo.config.autoMerge;
   if (mode === "off") return;
   const stopped = mode === "on" ? stopRuleTripped(repo, token) : undefined;
   for (const pr of prs) {
     const approver = pr.labels.some((l) => l.name === "risk:low") ? undefined : await approvedBy(repo, token, pr);
-    if ((await qualifies(repo, token, pr, approver)) !== undefined) continue;
+    const why = await qualifies(repo, token, pr, approver);
+    const key = `${repo.slug}#${pr.number}`;
+    // Say once why a PR is waiting, so a green PR that never merges isn't silent.
+    if (why !== waiting.get(key)) {
+      waiting.set(key, why);
+      if (why) note("pr", repo.slug, `${repo.name} PR #${pr.number}: waiting: ${why}`, facts(pr));
+    }
+    if (why !== undefined) continue;
     const comments = gh(
       repo,
       token,

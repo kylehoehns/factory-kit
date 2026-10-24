@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Finding, followUpsIn, secondOpinion, withFollowUps } from "./findings.ts";
+import { type Finding, followUpsIn, secondOpinion, threadFor, withFollowUps } from "./findings.ts";
 
 const f = (title: string): Finding => ({ kind: "follow-up", title, path: "app/X.java", line: 3, body: "why" });
 
@@ -46,4 +46,14 @@ test("the latest second opinion's findings block is read", () => {
 test("a second opinion without a readable findings block is left to the maintainer", () => {
   assert.equal(secondOpinion([{ id: "1", body: "Second opinion (security)\n\nNo block here." }]), undefined);
   assert.equal(secondOpinion([{ id: "2", body: "Second opinion (security)\n```findings\nnot json\n```" }]), undefined);
+});
+
+test("a finding finds its thread even when the thread puts code in backticks", () => {
+  const threads = [
+    { id: "a", body: "[follow-up] **Plan pattern is a loose substring match**\n\nwhy" },
+    { id: "b", body: "[follow-up] **Renamed causes break saved `?cause=` links**\n\nwhy" },
+  ];
+  assert.equal(threadFor(threads, "Renamed causes break saved ?cause= links")?.id, "b");
+  assert.equal(threadFor(threads, "Plan pattern is a loose substring match")?.id, "a");
+  assert.equal(threadFor(threads, "Something else"), undefined);
 });
