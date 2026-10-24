@@ -1,10 +1,12 @@
 // Fix rounds on open factory PRs, each capped (Stripe: at most two CI rounds, then a human):
 //   ci      the `ci` check failed on the PR's head commit: a session gets the failed steps' log
 //   update  the PR conflicts with main (another PR merged first): a session merges main in and resolves it
+//   opinion the second opinion errored (posted nothing readable): asked once more on the same commit, no session
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  api,
   appToken,
   ciResult,
   comment,
@@ -18,7 +20,7 @@ import {
 } from "./github.ts";
 import { pruneWorktrees, runSessions, type Session } from "./sandbox.ts";
 import { BRANCH_PREFIX, forbiddenChanges, kit, type Repo, RUNS, run } from "./shared.ts";
-import { log } from "./status.ts";
+import { log, note } from "./status.ts";
 
 export type Hooks = {
   writeTask: (issue: number, token: string) => Promise<void>;
@@ -63,12 +65,36 @@ async function fixRound(repo: Repo, pr: FactoryPr, round: Round, claudeToken: st
   log(`${repo.name} PR #${pr.number}: pushed ${label}`);
 }
 
+/** A second opinion that errored gets one more try on the same commit; after that the PR waits for the maintainer. */
+async function retryOpinion(repo: Repo, token: string, pr: FactoryPr) {
+  const { statuses } = await api<{ statuses: { context: string; state: string }[] }>(
+    repo,
+    token,
+    `/commits/${pr.headRefOid}/status`,
+  );
+  if (statuses.find((s) => s.context === "second-opinion")?.state !== "error") return;
+  if (roundsTried(repo, token, pr.number, "opinion").includes(pr.headRefOid)) return;
+  const sha = pr.headRefOid.slice(0, 7);
+  comment(
+    repo,
+    token,
+    pr.number,
+    `The second opinion on \`${sha}\` posted nothing readable; asking once more.\n\n${roundMarker("opinion", pr.headRefOid)}`,
+  );
+  requestSecondOpinion(repo, token, pr.number);
+  note("pr", repo.slug, `${repo.name} PR #${pr.number}: second opinion errored on ${sha}; asked again`, {
+    pr: pr.number,
+    issue: Number(pr.headRefName.slice(BRANCH_PREFIX.length)),
+  });
+}
+
 export async function fixPrs(repo: Repo, claudeToken: string, hooks: Hooks) {
   const task = join(repo.root, RUNS, "task.md");
   const ciLog = join(repo.root, RUNS, "ci-failure.log");
   const token = await appToken(repo);
   for (const pr of openFactoryPrs(repo, token, BRANCH_PREFIX)) {
     if (pr.labels.some((l) => l.name === "agent:blocked")) continue;
+    await retryOpinion(repo, token, pr);
     if (pr.mergeable === "CONFLICTING") {
       await fixRound(
         repo,

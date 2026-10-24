@@ -73,19 +73,21 @@ async function qualifies(
   approver: string | undefined,
 ): Promise<string | undefined> {
   const labels = new Set(pr.labels.map((l) => l.name));
-  if (!labels.has("risk:low") && !approver) return "not low tier, and no maintainer approval of the head commit";
-  for (const label of ["decision-needed", "agent:blocked"]) if (labels.has(label)) return `labelled ${label}`;
-  const ci = await ciResult(repo, token, pr.headRefOid);
-  if (!ci || ci.failed) return "ci not green";
   const { statuses } = await api<{ statuses: { context: string; state: string }[] }>(
     repo,
     token,
     `/commits/${pr.headRefOid}/status`,
   );
+  const opinion = statuses.find((s) => s.context === "second-opinion")?.state;
+  // Said first, because an errored opinion is also why a small PR isn't low tier yet.
+  if (opinion === "error") return "the second opinion errored (it posted nothing readable)";
+  if (!labels.has("risk:low") && !approver) return "not low tier, and no maintainer approval of the head commit";
+  for (const label of ["decision-needed", "agent:blocked"]) if (labels.has(label)) return `labelled ${label}`;
+  const ci = await ciResult(repo, token, pr.headRefOid);
+  if (!ci || ci.failed) return "ci not green";
   if (statuses.find((s) => s.context === "risk-gate")?.state !== "success") return "risk-gate not green";
   // High tier also needs the independent second opinion to have read this commit (rsvp-factory's ADR 0003). A pass or a fail both
   // count: a fail leaves blockers (fix rounds) or a decision-needed label, and both wait for the maintainer anyway.
-  const opinion = statuses.find((s) => s.context === "second-opinion")?.state;
   if (labels.has("risk:high") && opinion !== "success" && opinion !== "failure") {
     return "the second opinion hasn't read the head commit";
   }

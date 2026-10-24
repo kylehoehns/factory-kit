@@ -205,7 +205,7 @@ export function failedLog(repo: Repo, runId: string): string {
 }
 
 /** Commits the factory has already run a fix round of this kind on, from markers in its own PR comments. */
-export function roundsTried(repo: Repo, token: string, pr: number, kind: "ci" | "update"): string[] {
+export function roundsTried(repo: Repo, token: string, pr: number, kind: "ci" | "update" | "opinion"): string[] {
   const marker = new RegExp(`<!-- factory-${kind}-round sha=([0-9a-f]+) -->`, "g");
   const bodies = JSON.parse(gh(repo, token, "pr", "view", String(pr), "--json", "comments")).comments as {
     body: string;
@@ -213,6 +213,6 @@ export function roundsTried(repo: Repo, token: string, pr: number, kind: "ci" | 
   return bodies.flatMap((c) => [...c.body.matchAll(marker)].map((m) => m[1]));
 }
 
-export function roundMarker(kind: "ci" | "update", sha: string): string {
+export function roundMarker(kind: "ci" | "update" | "opinion", sha: string): string {
   return `<!-- factory-${kind}-round sha=${sha} -->`;
 }
