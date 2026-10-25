@@ -1,0 +1,24 @@
+# The kit's own changes get the same independent second opinion as the repos it serves: add the `claude-review`
+# label to a PR. Needs the CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`).
+name: second-review
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  second-review:
+    if: github.event.label.name == 'claude-review'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write
+      id-token: write
+    uses: ./.github/workflows/second-opinion.yml
+    with:
+      allowed-bots: kh-factory-bot
+      # Record the verdict with this PR's own kit code, so a change to the verdict step is judged by itself.
+      kit-ref: ${{ github.event.pull_request.head.sha }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
