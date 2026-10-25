@@ -65,6 +65,18 @@ async function approvedBy(repo: Repo, token: string, pr: FactoryPr): Promise<str
  *  waits for the maintainer; once they approve the head commit with no decision-needed label, it is settled. */
 const isFinding = (t: Thread) => /^\[(one-way-door|blocker)\] \*\*/.test(t.body);
 
+/**
+ * The reasons a PR waits that need no more API calls, in order: a label a person must act on comes first, so a PR the
+ * factory blocked reads as the maintainer's wait and is never blocked again for the same thing; then an errored second
+ * opinion, which is also why a small PR isn't low tier yet; then the tier.
+ */
+export function firstWait(labels: Set<string>, opinion: string | undefined, approved: boolean): string | undefined {
+  for (const label of ["decision-needed", "agent:blocked"]) if (labels.has(label)) return `labelled ${label}`;
+  if (opinion === "error") return "the second opinion errored (it posted nothing readable)";
+  if (!labels.has("risk:low") && !approved) return "not low tier, and no maintainer approval of the head commit";
+  return undefined;
+}
+
 /** Why this PR can't merge yet, or undefined if it can. `approver` is set for a medium or high PR a maintainer approved. */
 async function qualifies(
   repo: Repo,
@@ -79,10 +91,8 @@ async function qualifies(
     `/commits/${pr.headRefOid}/status`,
   );
   const opinion = statuses.find((s) => s.context === "second-opinion")?.state;
-  // Said first, because an errored opinion is also why a small PR isn't low tier yet.
-  if (opinion === "error") return "the second opinion errored (it posted nothing readable)";
-  if (!labels.has("risk:low") && !approver) return "not low tier, and no maintainer approval of the head commit";
-  for (const label of ["decision-needed", "agent:blocked"]) if (labels.has(label)) return `labelled ${label}`;
+  const first = firstWait(labels, opinion, approver !== undefined);
+  if (first) return first;
   const ci = await ciResult(repo, token, pr.headRefOid);
   if (!ci || ci.failed) return "ci not green";
   if (statuses.find((s) => s.context === "risk-gate")?.state !== "success") return "risk-gate not green";
@@ -97,10 +107,27 @@ async function qualifies(
   return undefined;
 }
 
-/** The last reason given for each PR waiting, so it is noted when it changes, not every pass. */
-const waiting = new Map<string, string | undefined>();
+/** Reasons that are the maintainer's to act on; the pane already lists each one. Any other wait is the machinery's. */
+const MAINTAINERS = ["not low tier", "labelled "];
+export const STUCK_MINUTES = 30;
 
-export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
+/** Whether a PR has waited on the machinery (CI, the risk gate, the second opinion, a thread) with one reason for too
+ *  long, so a person should look instead of the PR sitting silent. */
+export function isStuck(why: string | undefined, since: number, now: number): boolean {
+  if (!why || MAINTAINERS.some((m) => why.startsWith(m))) return false;
+  return now - since >= STUCK_MINUTES * 60_000;
+}
+
+/** Each PR's current wait: the reason and head commit, and since when. A new commit or a new reason starts the clock
+ *  over, and so does a factory restart. */
+const waiting = new Map<string, { why: string | undefined; sha: string; since: number }>();
+
+export async function autoMerge(
+  repo: Repo,
+  token: string,
+  prs: FactoryPr[],
+  block: (target: number, reason: string) => void,
+) {
   const mode = repo.config.autoMerge;
   if (mode === "off") return;
   const stopped = mode === "on" ? stopRuleTripped(repo, token) : undefined;
@@ -109,9 +136,19 @@ export async function autoMerge(repo: Repo, token: string, prs: FactoryPr[]) {
     const why = await qualifies(repo, token, pr, approver);
     const key = `${repo.slug}#${pr.number}`;
     // Say once why a PR is waiting, so a green PR that never merges isn't silent.
-    if (why !== waiting.get(key)) {
-      waiting.set(key, why);
-      if (why) note("pr", repo.slug, `${repo.name} PR #${pr.number}: waiting: ${why}`, facts(pr));
+    const last = waiting.get(key);
+    if (why !== last?.why || pr.headRefOid !== last?.sha) {
+      waiting.set(key, { why, sha: pr.headRefOid, since: Date.now() });
+      if (why && why !== last?.why) note("pr", repo.slug, `${repo.name} PR #${pr.number}: waiting: ${why}`, facts(pr));
+    }
+    // And hand it to a person if that wait isn't theirs and doesn't end.
+    if (isStuck(why, waiting.get(key)?.since ?? Date.now(), Date.now())) {
+      try {
+        block(pr.number, `this PR has waited ${STUCK_MINUTES} minutes with nothing for the factory to do: ${why}.`);
+      } catch (e) {
+        log(`${repo.name} PR #${pr.number}: could not hand it to the maintainer: ${e}`); // try again next pass
+      }
+      continue;
     }
     if (why !== undefined) continue;
     const comments = gh(
