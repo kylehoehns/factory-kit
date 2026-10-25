@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isStuck, STUCK_MINUTES } from "./automerge.ts";
+import { firstWait, isStuck, STUCK_MINUTES } from "./automerge.ts";
 
 const later = (minutes: number) => minutes * 60_000;
 
@@ -16,4 +16,17 @@ test("a wait that is the maintainer's, or no wait at all, is never stuck", () =>
   assert.equal(isStuck("labelled decision-needed", 0, later(600)), false);
   assert.equal(isStuck("labelled agent:blocked", 0, later(600)), false);
   assert.equal(isStuck(undefined, 0, later(600)), false);
+});
+
+test("a PR blocked for an errored second opinion reads as the maintainer's wait, so it isn't blocked again", () => {
+  const blocked = new Set(["risk:low", "agent:blocked"]);
+  const why = firstWait(blocked, "error", false);
+  assert.equal(why, "labelled agent:blocked");
+  assert.equal(isStuck(why, 0, later(600)), false);
+  assert.equal(
+    firstWait(new Set(["risk:low"]), "error", false),
+    "the second opinion errored (it posted nothing readable)",
+  );
+  assert.equal(firstWait(new Set(["risk:medium"]), "success", false)?.startsWith("not low tier"), true);
+  assert.equal(firstWait(new Set(["risk:medium"]), "success", true), undefined);
 });
