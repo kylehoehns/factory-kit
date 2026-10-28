@@ -45,6 +45,29 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Check out the factory kit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kylehoehns/factory-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .factory-kit
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .factory-kit/.nvmrc
+
+      # Later rounds read only what changed since the last commit the second opinion read, and are told what earlier
+      # rounds found and how the factory answered, so they don't report the same thing again. If this fails, the
+      # second opinion reviews the whole diff as before.
+      - name: Gather earlier rounds
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .factory-kit/src/rereview-cli.ts
+
       - name: Second opinion
         uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1
         with:
@@ -58,7 +81,15 @@ jobs:
             `gh pr view ${{ github.event.pull_request.number }}`. The description says which ticket it closes; read that
             ticket with its comments, `gh issue view <number> --comments`, and read CODING_STANDARDS.md if it exists.
             A comment headed "Agent Brief" is part of the ticket: where it differs from the body, the brief is what was
-            asked for. Then check:
+            asked for.
+
+            Then read `.second-opinion/context.md`, if it exists. When it says an earlier second opinion read this PR,
+            this is a later round, after the factory fixed or answered what that round found. Review only the changes
+            in `.second-opinion/changes.diff`, using the full diff for context, and:
+            - Don't report an earlier finding again. Where the factory says it fixed one, check the fix: report it only
+              if the fix is wrong or incomplete. Where the factory declined one, leave it: the maintainer decides.
+            - Report a problem in code that hasn't changed since the earlier round only if it is a blocker you can show.
+            Then check:
             - The ticket: everything it asks for is there and works, and nothing it didn't ask for was added.
             - The coding standards: a clear break of a rule in CODING_STANDARDS.md. Style and taste are not breaks.
             And look for what could go wrong in production:
@@ -75,7 +106,8 @@ jobs:
               scope the ticket didn't ask for, or a clear break of a coding standard. The factory fixes blockers.
             - one-way-door: expensive to undo later (schema, public API, published data) and a decision for the maintainer.
             - follow-up: real but not proven, or not introduced by this PR. It becomes a ticket after merge.
-            Leave out style and taste entirely.
+            Leave out style and taste entirely. When the same mistake shows up in several places, make it one finding:
+            say what kind of mistake it is and list every place in the PR it occurs, so it can be fixed everywhere at once.
 
             Don't post inline comments: the factory posts each finding on its line as a thread it can answer.
             Post one summary comment that starts with "Second opinion", lists the problems or says plainly that
@@ -86,20 +118,6 @@ jobs:
           claude_args: >-
             --model ${{ inputs.model }} --max-turns 20
             --allowedTools "Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
-
-      - name: Check out the factory kit
-        if: always()
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kylehoehns/factory-kit
-          ref: ${{ inputs.kit-ref }}
-          path: .factory-kit
-          persist-credentials: false
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: always()
-        with:
-          node-version-file: .factory-kit/.nvmrc
 
       # Read the opinion back and pin the verdict to the commit that was reviewed.
       - name: Record the verdict on the reviewed commit
