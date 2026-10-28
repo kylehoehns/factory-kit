@@ -30,7 +30,7 @@ A tier only goes up. Each repo's `.factory/config.yml` says which paths are high
 2. **Copy `template/`** into the repo. Then edit `.factory/config.yml` (the check command, maintainers, the bot name, risk paths) and add your stack's tools to `.factory/Dockerfile`.
 3. **Add the `CLAUDE_CODE_OAUTH_TOKEN` secret** to the repo, for the second opinion.
 4. **Gitignore** `.factory/runs/` and `.sandcastle/`.
-5. **Write `AGENTS.md`.** The prompts point agents at it for which commands to run, where each kind of test lives, and which files must stay numbered in order.
+5. **Write `AGENTS.md`.** The prompts point agents at it for which commands to run, where each kind of test lives, which files must stay numbered in order, and which skill (if any) reviews a branch against its ticket. The reviewer also runs Claude Code's built-in `code-review` and `security-review`, so don't give a repo skill either name: it would take the built-in one's place.
 
 ## Running the factory
 
