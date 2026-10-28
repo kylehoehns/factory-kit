@@ -2,8 +2,9 @@
 # (see template/.github/workflows/second-review.yml): the factory adds the label to every PR it opens, and again after
 # each round that pushes new commits; the maintainer can add it to any PR.
 #
-# Independent means a different system from the factory that wrote and reviewed the code: a prompt read from this
-# workflow, not from the factory, one summary comment only, and a capped number of turns. Its verdict is posted as the
+# Independent means a different system from the factory that wrote and reviewed the code: its own prompt
+# (prompts/second-opinion.md, read from the kit at kit-ref, never from the PR), one summary comment only, and a capped
+# number of turns. Its verdict is posted as the
 # `second-opinion` status on the commit it read; the risk gate counts a pass toward the low tier.
 name: second-opinion
 
@@ -57,67 +58,41 @@ jobs:
         with:
           node-version-file: .factory-kit/.nvmrc
 
-      # Later rounds read only what changed since the last commit the second opinion read, and are told what earlier
-      # rounds found and how the factory answered, so they don't report the same thing again. If this fails, the
-      # second opinion reviews the whole diff as before.
-      - name: Gather earlier rounds
-        continue-on-error: true
+      # Its inputs as files: the PR, its diff, its ticket, and what earlier rounds said (so a later round reads only
+      # what changed and doesn't report the same thing again). The prompt reads only these and the checkout, so the
+      # eval harness can replay it offline.
+      - name: Gather the inputs
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
-        run: node .factory-kit/src/rereview-cli.ts
+        run: node .factory-kit/src/opinion-cli.ts
+
+      # The kit's prompt, plus how to deliver the opinion here: as one comment, which the factory reads.
+      - name: Load the prompt
+        id: prompt
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo 'text<<PROMPT_END'
+            cat .factory-kit/prompts/second-opinion.md
+            echo
+            echo "Post your opinion as one comment on PR #$PR with \`gh pr comment $PR --body-file -\`, the opinion on"
+            echo "stdin. Don't post inline comments: the factory posts each finding on its line as a thread it can"
+            echo "answer. Don't approve or request changes: the maintainer decides."
+            echo 'PROMPT_END'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Second opinion
         uses: anthropics/claude-code-action@a5a423f75c251dcbff8a74e99f83b2cb03c72bfa # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: ${{ inputs.allowed-bots }}
-          prompt: |
-            You are the independent second reviewer for pull request ${{ github.repository }}#${{ github.event.pull_request.number }}.
-            If you find nothing below, it may merge with no person reading it, so check it as if that were true.
-
-            Read the diff with `gh pr diff ${{ github.event.pull_request.number }}` and the description with
-            `gh pr view ${{ github.event.pull_request.number }}`. The description says which ticket it closes; read that
-            ticket with its comments, `gh issue view <number> --comments`, and read CODING_STANDARDS.md if it exists.
-            A comment headed "Agent Brief" is part of the ticket: where it differs from the body, the brief is what was
-            asked for.
-
-            Then read `.second-opinion/context.md`, if it exists. When it says an earlier second opinion read this PR,
-            this is a later round, after the factory fixed or answered what that round found. Review only the changes
-            in `.second-opinion/changes.diff`, using the full diff for context, and:
-            - Don't report an earlier finding again. Where the factory says it fixed one, check the fix: report it only
-              if the fix is wrong or incomplete. Where the factory declined one, leave it: the maintainer decides.
-            - Report a problem in code that hasn't changed since the earlier round only if it is a blocker you can show.
-            Then check:
-            - The ticket: everything it asks for is there and works, and nothing it didn't ask for was added.
-            - The coding standards: a clear break of a rule in CODING_STANDARDS.md. Style and taste are not breaks.
-            And look for what could go wrong in production:
-            - Who can do what: defaults that make something public, missing permission checks, data one user can
-              see or change that belongs to another.
-            - Personal data: user details exposed in responses, logs, errors or published files.
-            - Schema, migrations and published data: anything hard to undo, data that could be lost, a contract other
-              code or other people rely on changing shape.
-            - Secrets and credentials: anything that would be unsafe in a public repository.
-
-            Sort each problem into one kind:
-            - blocker: introduced by this PR, and you can show how it goes wrong (an attack path, a request that
-              leaks data, a migration that loses data), or something the ticket asks for that is missing or wrong,
-              scope the ticket didn't ask for, or a clear break of a coding standard. The factory fixes blockers.
-            - one-way-door: expensive to undo later (schema, public API, published data) and a decision for the maintainer.
-            - follow-up: real but not proven, or not introduced by this PR. It becomes a ticket after merge.
-            Leave out style and taste entirely. When the same mistake shows up in several places, make it one finding:
-            say what kind of mistake it is and list every place in the PR it occurs, so it can be fixed everywhere at once.
-
-            Don't post inline comments: the factory posts each finding on its line as a thread it can answer.
-            Post one summary comment that starts with "Second opinion", lists the problems or says plainly that
-            you found none, and ends with a fenced code block tagged `findings` holding a JSON array, one object per
-            problem: {"kind": "blocker" | "one-way-door" | "follow-up", "title": "<under 70 characters>", "path": "<file>",
-            "line": <line in the PR's version of the file>, "body": "<what could happen and what you'd change>"}. Use [] when there are none.
-            Don't approve or request changes: the maintainer decides.
+          prompt: ${{ steps.prompt.outputs.text }}
           claude_args: >-
             --model ${{ inputs.model }} --max-turns 20
-            --allowedTools "Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
+            --allowedTools "Read,Bash(gh pr comment:*)"
 
       # Read the opinion back and pin the verdict to the commit that was reviewed.
       - name: Record the verdict on the reviewed commit

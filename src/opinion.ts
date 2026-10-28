@@ -1,6 +1,28 @@
-// What the second opinion already said on a PR, so a later round reads only what changed and doesn't report the same
-// thing again. Pure, so the tests cover it; rereview-cli.ts is the GitHub plumbing around it. An agent author and an
-// agent reviewer can cycle forever when every round re-reads everything: each pass turns up one more old problem.
+// The second opinion's inputs, as files: the PR, its ticket, and what earlier rounds already said, so a later round
+// reads only what changed and doesn't report the same thing again. Files rather than `gh` calls, so the eval harness
+// can replay the same prompt offline. Pure, so the tests cover it; opinion-cli.ts is the GitHub plumbing around it.
+// An agent author and an agent reviewer can cycle forever when every round re-reads everything: each pass turns up
+// one more old problem.
+
+/** The ticket a PR body closes, by GitHub's closing keywords ("Closes #12", "fixes #3"). */
+export function ticketIn(body: string): number | undefined {
+  const n = body.match(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/i)?.[1];
+  return n ? Number(n) : undefined;
+}
+
+export type Issue = {
+  number: number;
+  title: string;
+  body: string;
+  comments: { author: { login: string }; body: string }[];
+};
+
+/** The ticket as markdown: body, then each comment. Built from JSON because `gh issue view --comments` prints only the
+ *  comments when its output isn't a terminal, as in CI. */
+export function ticketText(issue: Issue): string {
+  const comments = issue.comments.map((c) => `## Comment by ${c.author.login}\n\n${c.body}`);
+  return `${[`# #${issue.number}: ${issue.title}`, issue.body, ...comments].join("\n\n")}\n`;
+}
 
 export type EarlierFinding = { kind: string; title: string; path?: string; line?: number; body: string };
 export type ReviewComment = { id: number; body: string; in_reply_to_id?: number };
