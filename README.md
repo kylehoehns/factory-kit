@@ -9,7 +9,7 @@ It came out of [rsvp-factory](https://github.com/kylehoehns/rsvp-factory), where
 | Part | What it does |
 |---|---|
 | `src/factory.ts` | The loop. Run it with `npm run factory`. Every minute, for each repo it watches, it fixes red CI and merge conflicts on its PRs, acts on second-opinion findings, merges what's allowed, files follow-ups, and builds the next ready ticket. |
-| `prompts/` | What each agent session is told: implement, review, fix CI, fix review findings, update a branch. |
+| `prompts/` | What each agent session is told: implement, review, fix CI, fix review findings, update a branch. Also the second opinion's prompt, which `second-opinion.yml` reads from here. |
 | `.github/workflows/risk-gate.yml` | A reusable workflow. It labels each PR `risk:low`, `risk:medium` or `risk:high` from the repo's policy. |
 | `.github/workflows/second-opinion.yml` | A reusable workflow. An independent Claude review posts findings and a `second-opinion` status on the commit it read. |
 | `template/` | The files a repo adds to use the factory. |

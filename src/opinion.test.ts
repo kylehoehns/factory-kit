@@ -1,10 +1,33 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { answerTo, context, earlierFindings, lastReviewed, onlyFiles } from "./rereview.ts";
+import { answerTo, context, earlierFindings, lastReviewed, onlyFiles, ticketIn, ticketText } from "./opinion.ts";
+
+test("the ticket is the one the PR body closes", () => {
+  assert.equal(ticketIn("## Summary\n\nDid it.\n\nCloses #82\n"), 82);
+  assert.equal(ticketIn("fixes #3 and closes #4"), 3);
+  assert.equal(ticketIn("Resolved: #7"), 7);
+  assert.equal(ticketIn("See #82 for background"), undefined);
+  assert.equal(ticketIn("enclosed #5"), undefined);
+});
 
 const opinion = (findings: unknown) =>
   `Second opinion\n\nStuff.\n\n\`\`\`findings\n${JSON.stringify(findings)}\n\`\`\``;
 const blocker = (title: string, body = "why") => ({ kind: "blocker", title, path: "src/a.ts", line: 3, body });
+
+test("the ticket text has its body and every comment, in order", () => {
+  const text = ticketText({
+    number: 82,
+    title: "Organizers see attendance",
+    body: "Signed-out visitors get not-an-organizer.",
+    comments: [
+      { author: { login: "kylehoehns" }, body: "Correction: signed-out visitors get 401." },
+      { author: { login: "kh-factory-bot" }, body: "## Agent Brief\n\nBuild it." },
+    ],
+  });
+  assert.match(text, /^# #82: Organizers see attendance\n\nSigned-out visitors get not-an-organizer\.\n\n/);
+  assert.ok(text.indexOf("Correction") < text.indexOf("Agent Brief"));
+  assert.match(text, /## Comment by kylehoehns\n\nCorrection/);
+});
 
 test("the last reviewed commit is the newest one before the head whose opinion passed or failed", () => {
   const states = new Map([
